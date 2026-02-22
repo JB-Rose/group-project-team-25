@@ -200,7 +200,7 @@
   gap: 16px;
 }
 
-.error-message {
+.field-error {
   display: block;
   color: #e74c3c;
   font-size: 12px;

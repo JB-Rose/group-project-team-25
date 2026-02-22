@@ -1,3 +1,10 @@
+{/*
+TODO
+  Live input cleanup
+  Add apartment to form data
+  Make form validation stronger
+*/}
+
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import './Checkout.css'
@@ -34,6 +41,7 @@ function Checkout() {
   })
 
   const [submitMessage, setSubmitMessage] = useState('')
+  const [errors, setErrors] = useState({})
   const [isEvaluating, setIsEvaluating] = useState(false)
   const [challengeState, setChallengeState] = useState(null) // { type: 'blocked' | 'puzzle', difficulty }
 
@@ -77,8 +85,58 @@ function Checkout() {
     }
   }
 
+  const validateForm = () => {
+    const newErrors = {}
+
+    // Remove spaces for checking
+    const cleanCardNumber = formData.card_number.replace(/\s/g, '')
+
+    if (!/^\d{16}$/.test(cleanCardNumber)) {
+      newErrors.card_number = 'Card number must be 16 digits'
+    }
+
+    if (!/^\d{2}\/\d{2}$/.test(formData.card_expiry)) {
+      newErrors.card_expiry = 'Expiry must be in MM/YY format'
+    }
+
+    if (!/^\d{3,4}$/.test(formData.card_cvv)) {
+      newErrors.card_cvv = 'CVC must be 3 or 4 digits'
+    }
+
+    if (!formData.full_name.trim()) {
+      newErrors.full_name = 'Name is required'
+    }
+
+    if (!formData.billing_address.trim()) {
+      newErrors.billing_address = 'Address is required'
+    }
+
+    if (!formData.city.trim()) {
+      newErrors.city = 'City is required'
+    }
+
+    if (!formData.state) {
+      newErrors.state = 'State is required'
+    }
+
+    if (!/^\d{5}$/.test(formData.zip_code)) {
+      newErrors.zip_code = 'Zip code must be 5 digits'
+    }
+
+    return newErrors
+  }
+
   const handleSubmit = async (e) => {
     e.preventDefault()
+
+    const validationErrors = validateForm()
+
+    if (Object.keys(validationErrors).length > 0) {
+      setErrors(validationErrors)
+      return
+    }
+
+    setErrors({})
 
     if (!bookingSelection) {
       setSubmitMessage('Error: No booking selection found')
@@ -191,6 +249,9 @@ function Checkout() {
                   onChange={handleChange}
                   placeholder="1234 5678 9012 3456"
                 />
+                {errors.card_number && (
+                  <p className="field-error">{errors.card_number}</p>
+                )}
               </div>
 
               <div className="form-row">
@@ -204,6 +265,9 @@ function Checkout() {
                     onChange={handleChange}
                     placeholder="MM/YY"
                   />
+                  {errors.card_expiry && (
+                    <p className="field-error">{errors.card_expiry}</p>
+                  )}
                 </div>
 
                 <div className="form-group">
@@ -216,6 +280,9 @@ function Checkout() {
                     onChange={handleChange}
                     placeholder="123"
                   />
+                  {errors.card_cvv && (
+                    <p className="field-error">{errors.card_cvv}</p>
+                  )}
                 </div>
               </div>
 
@@ -229,6 +296,9 @@ function Checkout() {
                   onChange={handleChange}
                   placeholder="John Doe"
                 />
+                {errors.full_name && (
+                    <p className="field-error">{errors.full_name}</p>
+                  )}
               </div>
             </div>
 
@@ -246,6 +316,9 @@ function Checkout() {
                   onChange={handleChange}
                   placeholder="123 Main Street"
                 />
+                {errors.billing_address && (
+                    <p className="field-error">{errors.billing_address}</p>
+                  )}
               </div>
 
               <div className="form-group">
@@ -269,6 +342,9 @@ function Checkout() {
                     onChange={handleChange}
                     placeholder="New York"
                   />
+                  {errors.city && (
+                    <p className="field-error">{errors.city}</p>
+                  )}
                 </div>
 
                 <div className="form-group">
@@ -281,6 +357,9 @@ function Checkout() {
                     onChange={handleChange}
                     placeholder="10001"
                   />
+                  {errors.zip_code && (
+                    <p className="field-error">{errors.zip_code}</p>
+                  )}
                 </div>
               </div>
 
@@ -310,6 +389,9 @@ function Checkout() {
                       <option key={state} value={state}>{state}</option>
                     ))}
                   </select>
+                  {errors.state && (
+                      <p className="field-error">{errors.state}</p>
+                  )}
                 </div>
               </div>
             </div>
@@ -359,7 +441,6 @@ function Checkout() {
             </table>
 
             <button 
-              type="submit" 
               className="purchase-button"
               onClick={handleSubmit}
             >
