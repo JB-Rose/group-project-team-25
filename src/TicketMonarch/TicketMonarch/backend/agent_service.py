@@ -2,130 +2,36 @@
 
 Loads the trained agent once on first use, then evaluates sessions
 by replaying events through the LSTM and returning the decision.
+
+Action masking: non-final windows only allow continue/honeypot (0,1).
+The final window only allows terminal actions (2-6: puzzles, allow, block).
+This matches the training environment exactly.
 """
 
 from __future__ import annotations
 
+import logging
 import sys
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
-# project root 
+# project root
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from rl_captcha.agent.ppo_lstm import PPOLSTM
 from rl_captcha.config import EventEnvConfig
 from rl_captcha.data.loader import Session
+from rl_captcha.environment.event_env import EventEncoder, ACTION_NAMES
 
-ACTION_NAMES = [
-    "continue", "deploy_honeypot",
-    "easy_puzzle", "medium_puzzle", "hard_puzzle",
-    "allow", "block",
-]
-
-EVENT_MOUSE = 0
-EVENT_CLICK = 1
-EVENT_KEY_DOWN = 2
-EVENT_KEY_UP = 3
-EVENT_SCROLL = 4
-
-INTERACTIVE_TAGS = {"INPUT", "BUTTON", "A", "SELECT", "TEXTAREA"}
-
-
-class EventEncoder:
-    """Standalone encoder matching EventEnv._encode_event() logic."""
-
-    def __init__(self, config: EventEnvConfig | None = None):
-        self.config = config or EventEnvConfig()
-        self.prev_mouse_x = 0.0
-        self.prev_mouse_y = 0.0
-        self.prev_mouse_t = 0.0
-
-    def reset(self):
-        self.prev_mouse_x = 0.0
-        self.prev_mouse_y = 0.0
-        self.prev_mouse_t = 0.0
-
-    def build_timeline(self, session: Session) -> list[dict]:
-        """Merge all event types, subsample mouse, sort by time."""
-        cfg = self.config
-        events = []
-
-        for i, evt in enumerate(session.mouse):
-            if i % cfg.mouse_subsample == 0:
-                events.append({"_type": EVENT_MOUSE, **evt})
-
-        for evt in session.clicks:
-            events.append({"_type": EVENT_CLICK, **evt})
-
-        for evt in session.keystrokes:
-            etype = EVENT_KEY_DOWN if evt.get("type") == "down" else EVENT_KEY_UP
-            events.append({"_type": etype, **evt})
-
-        for evt in session.scroll:
-            events.append({"_type": EVENT_SCROLL, **evt})
-
-        events.sort(key=lambda e: e.get("t", e.get("timestamp", 0)))
-
-        if len(events) > cfg.max_events:
-            events = events[: cfg.max_events]
-
-        return events
-
-    def encode(self, evt: dict) -> np.ndarray:
-        """Encode one event into 13-dim vector."""
-        cfg = self.config
-        vec = np.zeros(cfg.event_dim, dtype=np.float32)
-        etype = evt["_type"]
-
-        vec[etype] = 1.0
-
-        x = evt.get("x", evt.get("pageX", 0.0)) or 0.0
-        y = evt.get("y", evt.get("pageY", 0.0)) or 0.0
-        vec[5] = x / cfg.max_coord_x
-        vec[6] = y / cfg.max_coord_y
-
-        dt = evt.get("dt_since_last")
-        if dt is None or not isinstance(dt, (int, float)):
-            dt = 0.0
-        dt = max(dt, 0.0)
-        vec[7] = np.log1p(min(dt, cfg.max_dt_ms)) / np.log1p(cfg.max_dt_ms)
-
-        if etype == EVENT_MOUSE:
-            t = evt.get("t", 0.0)
-            if self.prev_mouse_t > 0 and t > self.prev_mouse_t:
-                dt_s = (t - self.prev_mouse_t) / 1000.0
-                dist = np.sqrt(
-                    (x - self.prev_mouse_x) ** 2 + (y - self.prev_mouse_y) ** 2
-                )
-                speed = dist / max(dt_s, 1e-6)
-                vec[8] = min(speed, cfg.max_speed) / cfg.max_speed
-            self.prev_mouse_x = x
-            self.prev_mouse_y = y
-            self.prev_mouse_t = t
-
-        if etype == EVENT_SCROLL:
-            dy = evt.get("dy", 0.0) or 0.0
-            vec[9] = np.clip(dy / cfg.max_scroll_dy, -1.0, 1.0)
-
-        if etype in (EVENT_KEY_DOWN, EVENT_KEY_UP):
-            vec[10] = 1.0 if evt.get("key") is not None else 0.0
-
-        if etype == EVENT_CLICK:
-            vec[11] = 1.0 if evt.get("button") == "left" else 0.0
-
-        if etype == EVENT_CLICK:
-            target = evt.get("target", {})
-            if isinstance(target, dict):
-                tag = (target.get("tag") or "").upper()
-                vec[12] = 1.0 if tag in INTERACTIVE_TAGS else 0.0
-
-        return vec
+# Action masks matching EventEnv
+NON_FINAL_MASK = np.array([1, 1, 0, 0, 0, 0, 0], dtype=np.float32)
+FINAL_MASK = np.array([0, 0, 1, 1, 1, 1, 1], dtype=np.float32)
 
 
 class AgentService:
@@ -139,11 +45,24 @@ class AgentService:
 
         self.checkpoint_path = checkpoint_path
         self.env_config = EventEnvConfig()
-        # Lock prevents concurrent network access (Flask is threaded;
-        # React StrictMode double-fires useEffect → duplicate requests)
+        self._online_update_count = 0
+
+        # online training logger
+        log_path = PROJECT_ROOT / "online_training.log"
+        self._online_logger = logging.getLogger("online_training")
+        self._online_logger.setLevel(logging.INFO)
+        self._online_logger.propagate = False
+        if not self._online_logger.handlers:
+            fh = logging.FileHandler(str(log_path), encoding="utf-8")
+            fh.setFormatter(logging.Formatter("%(message)s"))
+            self._online_logger.addHandler(fh)
+
         self._lock = threading.Lock()
-        # CPU is faster for this model (~100K params). CUDA init alone takes 20-30s on Windows.
-        self.agent = PPOLSTM(obs_dim=13, action_dim=7, device="cpu")
+        self.agent = PPOLSTM(
+            obs_dim=self.env_config.event_dim,
+            action_dim=7,
+            device="cpu",
+        )
 
         cp = Path(checkpoint_path) / "ppo_lstm_checkpoint.pt"
         if cp.exists():
@@ -155,207 +74,202 @@ class AgentService:
             self._loaded = False
             print(f"[AgentService] WARNING: No checkpoint at {checkpoint_path}, agent will allow all")
 
+    def _build_windows(self, session: Session) -> tuple[list[dict], list[list[dict]]]:
+        """Build timeline and split into overlapping windows."""
+        encoder = EventEncoder(self.env_config)
+        timeline = encoder.build_timeline(session)
+
+        ws = self.env_config.window_size
+        stride = ws // 2
+        windows = []
+        for start in range(0, len(timeline), stride):
+            window = timeline[start:start + ws]
+            if len(window) >= self.env_config.min_events:
+                windows.append(window)
+
+        return timeline, windows
+
     def evaluate_session(self, session: Session) -> dict:
-        """Run agent over ALL events, decide using final LSTM output.
-        use the LAST N events' averaged probabilities — the LSTM's
-        most informed assessment after processing all evidence.
-        """
+        """Run agent over all windows with action masking, decide on final window."""
         with self._lock:
             return self._evaluate_session(session)
 
     def _evaluate_session(self, session: Session) -> dict:
+        """Process all windows with proper action masking.
+
+        Non-final windows: mask to continue/honeypot only (observe phase).
+        Final window: mask to terminal actions only (decision phase).
+        Matches training environment exactly.
+        """
         if not self._loaded:
             return {
-                "decision": "allow",
-                "action_index": 5,
-                "events_processed": 0,
-                "total_events": 0,
-                "action_history": [],
-                "final_probs": [0] * 7,
-                "final_value": 0.0,
-                "reason": "no_checkpoint",
+                "decision": "allow", "action_index": 5,
+                "events_processed": 0, "total_events": 0,
+                "action_history": [], "final_probs": [0] * 7,
+                "final_value": 0.0, "reason": "no_checkpoint",
             }
 
         encoder = EventEncoder(self.env_config)
-        timeline = encoder.build_timeline(session)
+        timeline, windows = self._build_windows(session)
 
-        if len(timeline) < self.env_config.min_events:
+        if not windows:
             return {
-                "decision": "allow",
-                "action_index": 5,
-                "events_processed": len(timeline),
-                "total_events": len(timeline),
-                "action_history": [],
-                "final_probs": [0] * 7,
-                "final_value": 0.0,
-                "reason": "too_few_events",
+                "decision": "allow", "action_index": 5,
+                "events_processed": len(timeline), "total_events": len(timeline),
+                "action_history": [], "final_probs": [0] * 7,
+                "final_value": 0.0, "reason": "too_few_events",
             }
 
-        event_types_map = ["mouse", "click", "key_down", "key_up", "scroll"]
-        obs_list = [encoder.encode(evt) for evt in timeline]
-        obs_batch = np.stack(obs_list, axis=0)  # (T, 13)
-
         self.agent.reset_hidden()
-        with torch.no_grad():
-            obs_t = torch.from_numpy(obs_batch).float().unsqueeze(0).to(self.agent.device)
-            h, c = self.agent.get_hidden()
-            all_logits, all_values, new_hidden = self.agent.network(obs_t, (h, c))
-            all_probs = F.softmax(all_logits.squeeze(0), dim=-1).cpu().numpy()  # (T, 7)
-            all_vals = all_values.squeeze(0).squeeze(-1).cpu().numpy()  # (T,)
-            all_actions = np.argmax(all_probs, axis=-1)  # (T,)
-            self.agent._hidden = new_hidden
-
-        # build per-event action history for dashboard
         action_history = []
-        for i in range(len(timeline)):
-            action_history.append({
-                "event_idx": i,
-                "event_type": event_types_map[timeline[i]["_type"]],
-                "action": ACTION_NAMES[int(all_actions[i])],
-                "action_index": int(all_actions[i]),
-                "probs": [round(float(p), 4) for p in all_probs[i]],
-                "value": round(float(all_vals[i]), 4),
-            })
 
-        # Decision: average the last 10% of events (min 5) 
-        # The LSTM accumulates evidence; its final outputs are most reliable.
-        n_tail = max(5, len(timeline) // 10)
-        tail_probs = all_probs[-n_tail:].mean(axis=0)  # (7,)
+        with torch.no_grad():
+            for i, window in enumerate(windows):
+                is_final = (i == len(windows) - 1)
+                mask = FINAL_MASK if is_final else NON_FINAL_MASK
+                mask_t = torch.from_numpy(mask).float().unsqueeze(0).to(self.agent.device)
 
-        p_allow = float(tail_probs[5])
-        p_block = float(tail_probs[6])
-        p_puzzles = float(tail_probs[2] + tail_probs[3] + tail_probs[4])
+                obs = encoder.encode_window(window)
+                obs_t = torch.from_numpy(obs).float().unsqueeze(0).to(self.agent.device)
+                h, c = self.agent.get_hidden()
+
+                logits, values, new_hidden = self.agent.network(obs_t, (h, c), action_mask=mask_t)
+                probs = F.softmax(logits, dim=-1).cpu().numpy().squeeze()
+                value = float(values.squeeze().item())
+                action = int(np.argmax(probs))
+                self.agent._hidden = new_hidden
+
+                action_history.append({
+                    "window_idx": i,
+                    "window_events": len(window),
+                    "action": ACTION_NAMES[action],
+                    "action_index": action,
+                    "probs": [round(float(p), 4) for p in probs],
+                    "value": round(value, 4),
+                    "is_final": is_final,
+                })
+
+        last = action_history[-1]
+        final_probs_arr = np.array(last["probs"])
+        chosen = last["action_index"]
+
+        probs_list = [round(float(p), 4) for p in final_probs_arr]
+        p_allow = float(final_probs_arr[5])
+        p_block = float(final_probs_arr[6])
+        p_puzzles = float(final_probs_arr[2] + final_probs_arr[3] + final_probs_arr[4])
         p_suspicious = p_block + p_puzzles
-
-        # Confidence gating: need strong suspicious signal to challenge.
-        # Default is ALLOW, challenge when confident.
-        CHALLENGE_THRESHOLD = 0.45  # >45% suspicious to challenge
-
-        if p_suspicious > CHALLENGE_THRESHOLD:
-            if p_block > 0.4 or tail_probs[4] > 0.25:
-                chosen = 4  # hard puzzle
-            elif tail_probs[3] > tail_probs[2]:
-                chosen = 3  # medium
-            else:
-                chosen = 2  # easy
-            confidence = round(p_suspicious, 4)
-        else:
-            chosen = 5  # allow
-            confidence = round(p_allow, 4)
-
-        final_probs = [round(float(p), 4) for p in tail_probs]
 
         return {
             "decision": ACTION_NAMES[chosen],
             "action_index": chosen,
-            "confidence": confidence,
+            "confidence": round(max(p_allow, p_suspicious), 4),
             "events_processed": len(timeline),
             "total_events": len(timeline),
-            "final_probs": final_probs,
-            "final_value": round(float(all_vals[-1]), 4),
+            "num_windows": len(windows),
+            "windows_processed": len(action_history),
+            "final_probs": probs_list,
+            "final_value": round(last["value"], 4),
             "action_history": action_history,
             "p_allow": round(p_allow, 4),
             "p_suspicious": round(p_suspicious, 4),
         }
 
     def rolling_evaluate(self, session: Session) -> dict:
-        """Rolling evaluation using the LAST events' probabilities."""
+        """Rolling evaluation — bot probability from final window."""
         with self._lock:
             return self._rolling_evaluate(session)
 
     def _rolling_evaluate(self, session: Session) -> dict:
+        """Process all windows with masking, return bot probability."""
         if not self._loaded:
-            return {
-                "bot_probability": 0.0,
-                "deploy_honeypot": False,
-                "events_processed": 0,
-            }
+            return {"bot_probability": 0.0, "deploy_honeypot": False, "events_processed": 0}
 
         encoder = EventEncoder(self.env_config)
-        timeline = encoder.build_timeline(session)
+        timeline, windows = self._build_windows(session)
 
-        if len(timeline) < self.env_config.min_events:
-            return {
-                "bot_probability": 0.0,
-                "deploy_honeypot": False,
-                "events_processed": len(timeline),
-            }
-
-        obs_list = [encoder.encode(evt) for evt in timeline]
-        obs_batch = np.stack(obs_list, axis=0)
+        if not windows:
+            return {"bot_probability": 0.0, "deploy_honeypot": False, "events_processed": len(timeline)}
 
         self.agent.reset_hidden()
+        deploy_honeypot = False
+        last_probs = None
+
         with torch.no_grad():
-            obs_t = torch.from_numpy(obs_batch).float().unsqueeze(0).to(self.agent.device)
-            h, c = self.agent.get_hidden()
-            all_logits, _, _ = self.agent.network(obs_t, (h, c))
-            all_probs = F.softmax(all_logits.squeeze(0), dim=-1).cpu().numpy()  # (T, 7)
-            all_actions = np.argmax(all_probs, axis=-1)
+            for i, window in enumerate(windows):
+                is_final = (i == len(windows) - 1)
+                mask = FINAL_MASK if is_final else NON_FINAL_MASK
+                mask_t = torch.from_numpy(mask).float().unsqueeze(0).to(self.agent.device)
 
-        # use last 20% of events (min 5) for bot probability
-        n_tail = max(5, len(timeline) // 5)
-        tail_probs = all_probs[-n_tail:]
+                obs = encoder.encode_window(window)
+                obs_t = torch.from_numpy(obs).float().unsqueeze(0).to(self.agent.device)
+                h, c = self.agent.get_hidden()
 
-        # exponential weighting: most recent events count more
-        weights = np.exp(np.linspace(-2, 0, len(tail_probs)))
-        weights /= weights.sum()
+                logits, _, new_hidden = self.agent.network(obs_t, (h, c), action_mask=mask_t)
+                probs = F.softmax(logits, dim=-1).cpu().numpy().squeeze()
+                action = int(np.argmax(probs))
+                self.agent._hidden = new_hidden
 
-        # suspicious = puzzle + block probabilities
-        suspicious_per_event = tail_probs[:, [2, 3, 4, 6]].sum(axis=1)
-        bot_probability = float(np.dot(weights, suspicious_per_event))
+                if not is_final:
+                    last_probs = probs  # track non-final for honeypot
+                    if action == 1:
+                        deploy_honeypot = True
+                else:
+                    last_probs = probs  # final window probs for decision
 
-        deploy_honeypot = bool(1 in all_actions)
-        honeypot_steps = int((all_actions == 1).sum())
+        # suspicious = puzzle + block probabilities from final window
+        bot_probability = float(
+            last_probs[2] + last_probs[3] + last_probs[4] + last_probs[6]
+        )
 
         return {
             "bot_probability": round(bot_probability, 4),
             "deploy_honeypot": deploy_honeypot,
-            "honeypot_steps": honeypot_steps,
             "events_processed": len(timeline),
+            "num_windows": len(windows),
             "action_distribution": {
-                ACTION_NAMES[i]: round(float(tail_probs[:, i].mean()), 4)
+                ACTION_NAMES[i]: round(float(last_probs[i]), 4)
                 for i in range(7)
             },
         }
 
     def online_learn(self, session: Session, true_label: int) -> dict:
-        """Run one session through the environment and do an aggressive PPO update."""
+        """One-session PPO update with action masking (matches offline training)."""
         with self._lock:
             return self._online_learn(session, true_label)
 
     def _online_learn(self, session: Session, true_label: int) -> dict:
-        """Replay ALL events and do a PPO update with known true label.
+        """Replay session windows with action masking and do a PPO update.
 
-        process ALL events directly. For each event, the agent picks an
-        action. Non-terminal events get a small continue reward. The final
-        event gets the true-label reward (correct allow/block = positive,
-        wrong = negative). LSTM sees the entire sequence.
-
-        Online updates use 60% of the training LR and 3 epochs so the
-        agent learns meaningfully from every confirmed session.
+        Matches offline training exactly:
+        - Non-final windows: masked to continue/honeypot, get continue_penalty
+        - Final window: masked to terminal actions, get true-label reward
+        - Same GAE computation
         """
         if not self._loaded:
             return {"updated": False, "reason": "no_checkpoint"}
 
         encoder = EventEncoder(self.env_config)
-        timeline = encoder.build_timeline(session)
+        timeline, windows = self._build_windows(session)
 
-        if len(timeline) < self.env_config.min_events:
+        if not windows:
             return {"updated": False, "reason": "too_few_events",
                     "event_count": len(timeline)}
 
         cfg = self.env_config
+        label_str = "human" if true_label == 1 else "bot"
 
-        # encode all events
-        obs_list = [encoder.encode(evt) for evt in timeline]
+        # evaluate before update
+        before = self._evaluate_session(session)
 
-        # aggressive learning rate for online updates (60% of training LR)
+        # encode all windows
+        obs_list = [encoder.encode_window(w) for w in windows]
+
+        # online learning rate (60% of training LR)
         original_lr = self.agent.config.lr
         online_lr = original_lr * 0.6
         for pg in self.agent.optimizer.param_groups:
             pg['lr'] = online_lr
 
-        # 3 epochs per online update for stronger gradient signal
         original_epochs = self.agent.config.num_epochs
         self.agent.config.num_epochs = 3
 
@@ -363,46 +277,67 @@ class AgentService:
         self.agent.buffer.reset()
         self.agent.reset_hidden()
 
-        # replay ALL events through the agent
+        # replay all windows with proper action masking
         for i, obs in enumerate(obs_list):
-            action, log_prob, value = self.agent.select_action(obs)
             is_last = (i == len(obs_list) - 1)
+            mask = FINAL_MASK if is_last else NON_FINAL_MASK
+
+            action, log_prob, value = self.agent.select_action(obs, action_mask=mask)
 
             if is_last:
-                # final event: reward based on true label vs agent's decision
+                # terminal reward based on true label
                 if action == 5:  # allow
                     reward = cfg.reward_correct_allow if true_label == 1 else cfg.penalty_false_negative
                 elif action == 6:  # block
                     reward = cfg.reward_correct_block if true_label == 0 else cfg.penalty_false_positive
                 elif action in (2, 3, 4):  # puzzle
-                    # strong penalty for challenging a human, strong reward for catching a bot
                     reward = cfg.penalty_false_positive * 0.7 if true_label == 1 else cfg.reward_correct_block * 0.9
                 else:
-                    # continue/honeypot on last event — stronger penalty (should decide)
-                    reward = -0.3
+                    reward = -0.3  # should not happen with masking
                 done = True
             else:
-                # non-terminal: small penalty for continuing (encourages eventual decision)
                 reward = -cfg.continue_penalty
                 done = False
 
-            self.agent.buffer.push(obs, action, reward, done, log_prob, value)
+            self.agent.buffer.push(obs, action, reward, done, log_prob, value, action_mask=mask)
 
         self.agent.buffer.compute_gae(
-            last_value=0.0,  # episode ended
+            last_value=0.0,
             gamma=self.agent.config.gamma,
             gae_lambda=self.agent.config.gae_lambda,
         )
 
         metrics = self.agent.update()
 
-        # restore original settings
+        # restore settings
         self.agent.config.num_epochs = original_epochs
         for pg in self.agent.optimizer.param_groups:
             pg['lr'] = original_lr
 
-        self.agent.save(self.checkpoint_path)
         self.agent.network.eval()
+
+        # evaluate after update
+        after = self._evaluate_session(session)
+
+        self._online_update_count += 1
+        before_correct = (before["decision"] == "allow" and true_label == 1) or \
+                         (before["decision"] != "allow" and true_label == 0)
+        after_correct = (after["decision"] == "allow" and true_label == 1) or \
+                        (after["decision"] != "allow" and true_label == 0)
+
+        improvement = "IMPROVED" if (not before_correct and after_correct) else \
+                      "REGRESSED" if (before_correct and not after_correct) else \
+                      "UNCHANGED"
+
+        self.agent.save(self.checkpoint_path)
+
+        log = self._online_logger
+        log.info(f"--- Online Update #{self._online_update_count} | {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} ---")
+        log.info(f"  True label: {label_str} | Events: {len(timeline)} | Windows: {len(windows)}")
+        log.info(f"  BEFORE: decision={before['decision']} p_allow={before.get('p_allow', 0):.4f} p_suspicious={before.get('p_suspicious', 0):.4f} {'CORRECT' if before_correct else 'WRONG'}")
+        log.info(f"  AFTER:  decision={after['decision']} p_allow={after.get('p_allow', 0):.4f} p_suspicious={after.get('p_suspicious', 0):.4f} {'CORRECT' if after_correct else 'WRONG'}")
+        log.info(f"  Result: {improvement} | Policy loss: {metrics.get('policy_loss', 0):.4f} | Value loss: {metrics.get('value_loss', 0):.4f}")
+        log.info("")
 
         return {
             "updated": True,
@@ -410,15 +345,20 @@ class AgentService:
             "true_label": true_label,
             "online_lr": online_lr,
             "metrics": metrics,
+            "before_decision": before["decision"],
+            "after_decision": after["decision"],
+            "improvement": improvement,
         }
 
     def get_hidden_state_info(self) -> dict:
-        """Return LSTM hidden state for visualization."""
+        """Return LSTM hidden state for visualization (last layer only)."""
         h, c = self.agent.get_hidden()
+        # h shape: (num_layers, 1, hidden_size) — use last layer for viz
+        last_h = h[-1].squeeze(0).cpu().numpy()  # (hidden_size,)
         return {
             "lstm_hidden_norm": round(float(h.norm().item()), 4),
             "lstm_cell_norm": round(float(c.norm().item()), 4),
-            "lstm_hidden_values": [round(v, 4) for v in h.squeeze().cpu().numpy().tolist()],
+            "lstm_hidden_values": [round(float(v), 4) for v in last_h.tolist()],
         }
 
 

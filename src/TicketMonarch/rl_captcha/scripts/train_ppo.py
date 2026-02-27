@@ -122,10 +122,11 @@ def _collect_rollout(
 
     Returns summary statistics about the rollout.
     """
-    stats: dict = defaultdict(list)
     episode_rewards: list[float] = []
     episode_lengths: list[int] = []
-    outcome_counts: dict[str, int] = defaultdict(int)
+    episode_windows: list[int] = []
+    # Per-episode final outcomes (the actual classification decisions)
+    episode_outcomes: dict[str, int] = defaultdict(int)
 
     obs, info = env.reset()
     agent.reset_hidden()
@@ -137,21 +138,25 @@ def _collect_rollout(
         obs, info = env.reset()
         agent.reset_hidden()
 
-    for _step in range(num_steps):
-        action, log_prob, value = agent.select_action(obs)
+    action_mask = info.get("action_mask")
 
-        next_obs, reward, terminated, truncated, info = env.step(action)
+    for _step in range(num_steps):
+        action, log_prob, value = agent.select_action(obs, action_mask=action_mask)
+
+        next_obs, reward, terminated, truncated, step_info = env.step(action)
         done = terminated or truncated
 
-        agent.buffer.push(obs, action, reward, done, log_prob, value)
+        agent.buffer.push(obs, action, reward, done, log_prob, value, action_mask=action_mask)
 
         ep_reward += reward
         ep_len += 1
-        outcome_counts[info.get("outcome", "unknown")] += 1
 
         if done:
+            # Record the FINAL outcome (the actual classification decision)
+            episode_outcomes[step_info.get("outcome", "unknown")] += 1
             episode_rewards.append(ep_reward)
             episode_lengths.append(ep_len)
+            episode_windows.append(step_info.get("total_windows", ep_len))
             ep_reward = 0.0
             ep_len = 0
 
@@ -160,8 +165,10 @@ def _collect_rollout(
             while info.get("too_short"):
                 obs, info = env.reset()
                 agent.reset_hidden()
+            action_mask = info.get("action_mask")
         else:
             obs = next_obs
+            action_mask = step_info.get("action_mask")
 
     # Bootstrap value for GAE
     last_value = agent.get_value(obs) if not done else 0.0
@@ -170,7 +177,8 @@ def _collect_rollout(
         "last_value": last_value,
         "episode_rewards": episode_rewards,
         "episode_lengths": episode_lengths,
-        "outcome_counts": dict(outcome_counts),
+        "episode_windows": episode_windows,
+        "outcome_counts": dict(episode_outcomes),
         "steps_collected": agent.buffer.ptr,
     }
 
@@ -185,10 +193,12 @@ def _print_rollout_stats(
 ):
     ep_rewards = rollout_stats["episode_rewards"]
     ep_lengths = rollout_stats["episode_lengths"]
+    ep_windows = rollout_stats["episode_windows"]
     outcomes = rollout_stats["outcome_counts"]
 
     avg_reward = np.mean(ep_rewards) if ep_rewards else 0.0
     avg_length = np.mean(ep_lengths) if ep_lengths else 0.0
+    avg_windows = np.mean(ep_windows) if ep_windows else 0.0
     num_episodes = len(ep_rewards)
 
     print(f"--- Rollout {rollout_num}/{num_rollouts} | "
@@ -196,7 +206,8 @@ def _print_rollout_stats(
           f"Time: {elapsed:.1f}s ---")
     print(f"  Episodes: {num_episodes} | "
           f"Avg reward: {avg_reward:.3f} | "
-          f"Avg length: {avg_length:.1f}")
+          f"Avg length: {avg_length:.1f} | "
+          f"Avg windows: {avg_windows:.1f}")
 
     if update_metrics:
         print(f"  Policy loss: {update_metrics.get('policy_loss', 0):.4f} | "

@@ -52,6 +52,7 @@ class PPOLSTM:
         self.buffer = RolloutBuffer(
             capacity=self.config.rollout_steps,
             obs_dim=obs_dim,
+            action_dim=action_dim,
         )
 
         # Current LSTM hidden state (used during rollout collection)
@@ -72,9 +73,15 @@ class PPOLSTM:
     # ── Action selection ────────────────────────────────────────────
 
     def select_action(
-        self, obs: np.ndarray, deterministic: bool = False,
+        self, obs: np.ndarray, action_mask: np.ndarray | None = None,
+        deterministic: bool = False,
     ) -> tuple[int, float, float]:
         """Pick an action for one observation during rollout.
+
+        Args:
+            obs: Observation vector.
+            action_mask: Binary mask of valid actions (1=valid, 0=invalid).
+            deterministic: If True, pick the highest-probability action.
 
         Returns:
             (action, log_prob, value)
@@ -83,7 +90,11 @@ class PPOLSTM:
             obs_t = torch.from_numpy(obs).float().unsqueeze(0).to(self.device)
             h, c = self.get_hidden()
 
-            logits, values, new_hidden = self.network(obs_t, (h, c))
+            mask_t = None
+            if action_mask is not None:
+                mask_t = torch.from_numpy(action_mask).float().unsqueeze(0).to(self.device)
+
+            logits, values, new_hidden = self.network(obs_t, (h, c), action_mask=mask_t)
             probs = F.softmax(logits, dim=-1)
             dist = torch.distributions.Categorical(probs)
 
@@ -137,6 +148,7 @@ class PPOLSTM:
                 old_log_probs = seg["old_log_probs"].to(self.device)  # (T,)
                 advantages = seg["advantages"].to(self.device)        # (T,)
                 returns = seg["returns"].to(self.device)              # (T,)
+                masks = seg.get("action_masks")                       # (T, 7) or None
 
                 h0 = seg["h0"].to(self.device)  # (num_layers, 1, hidden)
                 c0 = seg["c0"].to(self.device)
@@ -148,7 +160,13 @@ class PPOLSTM:
                 # Forward pass: process entire segment sequentially
                 # obs shape: (T, obs_dim) → add batch dim → (1, T, obs_dim)
                 obs_seq = obs.unsqueeze(0)
-                logits, values, _ = self.network(obs_seq, (h0, c0))
+
+                # Pass action masks through network (masks invalid logits)
+                mask_t = None
+                if masks is not None:
+                    mask_t = masks.to(self.device).unsqueeze(0)  # (1, T, 7)
+
+                logits, values, _ = self.network(obs_seq, (h0, c0), action_mask=mask_t)
 
                 # logits: (1, T, action_dim), values: (1, T, 1)
                 logits = logits.squeeze(0)   # (T, action_dim)

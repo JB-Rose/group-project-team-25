@@ -245,7 +245,7 @@ def export_checkouts():
 # Honeypot detection
 # ---------------------------------------------------------------------------
 
-HONEYPOT_FIELDS = {"email_confirm", "phone_number"}
+HONEYPOT_FIELDS = {"company_url", "fax_number"}
 
 
 def _check_honeypot(keystroke_data, click_events):

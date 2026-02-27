@@ -5,7 +5,6 @@ import {
   fetchRecentSessions,
   fetchLiveTelemetry,
   rollingEvaluate,
-  confirmHumanSession,
 } from '../services/api'
 
 const ACTION_NAMES = [
@@ -24,9 +23,6 @@ function DevDashboard() {
   const [dashData, setDashData] = useState(null)
   const [loading, setLoading] = useState(false)
   const [autoRefresh, setAutoRefresh] = useState(true)
-  const [confirmResult, setConfirmResult] = useState(null)
-  const [confirming, setConfirming] = useState(false)
-
   const pollRef = useRef(null)
 
   useEffect(() => {
@@ -68,7 +64,6 @@ function DevDashboard() {
     setLiveData(null)
     setRollingData(null)
     setDashData(null)
-    setConfirmResult(null)
   }, [selectedId])
 
   const runFullAnalysis = async () => {
@@ -77,15 +72,6 @@ function DevDashboard() {
     const data = await fetchDashboardData(selectedId)
     if (data) setDashData(data)
     setLoading(false)
-  }
-
-  const confirmHuman = async () => {
-    if (!selectedId || confirming) return
-    setConfirming(true)
-    setConfirmResult(null)
-    const result = await confirmHumanSession(selectedId)
-    setConfirmResult(result)
-    setConfirming(false)
   }
 
   const selectSession = (sid) => setSelectedId(sid)
@@ -163,48 +149,8 @@ function DevDashboard() {
                   <button className="action-btn" onClick={runFullAnalysis} disabled={loading}>
                     {loading ? 'Analyzing...' : 'Run Full Analysis'}
                   </button>
-                  <button className="action-btn secondary" onClick={confirmHuman} disabled={confirming}>
-                    {confirming ? 'Updating...' : 'Confirm Human'}
-                  </button>
                 </div>
               </div>
-
-              {/* RL Update Result, shown after Confirm Human */}
-              {confirmResult && (
-                <div className={`detail-section rl-confirm-result ${confirmResult.updated ? 'updated' : 'skipped'}`}>
-                  <h3>{confirmResult.updated ? 'Agent Updated Successfully' : 'Update Skipped'}</h3>
-                  {confirmResult.reason && !confirmResult.updated && (
-                    <p className="confirm-reason">Reason: {confirmResult.reason.replace(/_/g, ' ')}</p>
-                  )}
-                  {confirmResult.updated && confirmResult.metrics && (
-                    <div className="confirm-metrics">
-                      <div className="confirm-metric">
-                        <span className="confirm-metric-val">{confirmResult.steps}</span>
-                        <span className="confirm-metric-lbl">Steps</span>
-                      </div>
-                      <div className="confirm-metric">
-                        <span className="confirm-metric-val">{confirmResult.metrics.policy_loss?.toFixed(4)}</span>
-                        <span className="confirm-metric-lbl">Policy Loss</span>
-                      </div>
-                      <div className="confirm-metric">
-                        <span className="confirm-metric-val">{confirmResult.metrics.value_loss?.toFixed(4)}</span>
-                        <span className="confirm-metric-lbl">Value Loss</span>
-                      </div>
-                      <div className="confirm-metric">
-                        <span className="confirm-metric-val">{confirmResult.metrics.entropy?.toFixed(4)}</span>
-                        <span className="confirm-metric-lbl">Entropy</span>
-                      </div>
-                      <div className="confirm-metric">
-                        <span className="confirm-metric-val">{(confirmResult.online_lr * 1000).toFixed(2)}e-3</span>
-                        <span className="confirm-metric-lbl">Learning Rate</span>
-                      </div>
-                    </div>
-                  )}
-                  {confirmResult.saved_json && (
-                    <p className="confirm-saved">Saved: {confirmResult.saved_json}</p>
-                  )}
-                </div>
-              )}
 
               {/* Live telemetry */}
               <div className="detail-section">
@@ -324,13 +270,13 @@ function DevDashboard() {
 
                   {(dashData.action_history || []).length > 0 && (
                     <div className="sub-card">
-                      <h4>Event Timeline ({dashData.action_history.length} events)</h4>
+                      <h4>Window Timeline ({dashData.action_history.length} windows)</h4>
                       <div className="event-timeline">
                         <table>
                           <thead>
                             <tr>
-                              <th>#</th>
-                              <th>Type</th>
+                              <th>Window</th>
+                              <th>Phase</th>
                               <th>Action</th>
                               <th>Value</th>
                               <th>Top Prob</th>
@@ -338,14 +284,14 @@ function DevDashboard() {
                           </thead>
                           <tbody>
                             {dashData.action_history.map((ev, i) => (
-                              <tr key={i}>
-                                <td>{i + 1}</td>
+                              <tr key={i} className={ev.is_final ? 'final-window' : ''}>
+                                <td>{ev.window_idx + 1} <span className="window-events">({ev.window_events} evts)</span></td>
                                 <td>
-                                  <span className={`event-type-badge ${ev.event_type || ''}`}>
-                                    {ev.event_type || '?'}
+                                  <span className={`event-type-badge ${ev.is_final ? 'decision' : 'observe'}`}>
+                                    {ev.is_final ? 'decision' : 'observe'}
                                   </span>
                                 </td>
-                                <td>{ev.action}</td>
+                                <td>{ev.action?.replace('_', ' ')}</td>
                                 <td>{ev.value?.toFixed(3) ?? '-'}</td>
                                 <td>{ev.probs ? (Math.max(...ev.probs) * 100).toFixed(1) + '%' : '-'}</td>
                               </tr>

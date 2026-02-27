@@ -2,7 +2,11 @@
 
 Real human browsing sessions. Treated as **label=1 (human)** by the training pipeline.
 
+**Important:** Only include data from the TicketMonarch site (localhost). Data from external sites (Gmail, GitHub, Canvas, etc.) will pollute the training distribution and was removed during cleanup.
+
 ## How to Collect
+
+### Option 1: Chrome Extension Export
 
 1. Load the Chrome extension from `chrome-extension/` into Chrome
 2. Click **"Start Recording"** in the extension popup
@@ -10,11 +14,21 @@ Real human browsing sessions. Treated as **label=1 (human)** by the training pip
 4. Click **"Export JSON"** in the extension popup
 5. Save the file here as `.json`
 
-Sessions are also auto-saved here by the backend when a human completes a purchase and the online learning update runs.
+### Option 2: Online Learning (via API)
 
-## JSON Format
+1. Browse the site normally while the backend is running
+2. Call `POST /api/agent/confirm` with `{ "session_id": "...", "true_label": 1 }`
+3. Sessions are auto-saved here as `session_<uuid>.json`
 
-Each file contains one or more sessions keyed by session UUID:
+Bot scripts call this endpoint automatically after each run. Sessions are saved and the agent does an online PPO update.
+
+## JSON Formats
+
+The data loader (`rl_captcha/data/loader.py`) supports two formats:
+
+### Chrome Extension Format (`telemetry_*.json`)
+
+One or more sessions keyed by session UUID:
 
 ```json
 {
@@ -37,7 +51,25 @@ Each file contains one or more sessions keyed by session UUID:
 }
 ```
 
-Segments are split by idle gaps (3+ seconds of inactivity). For training, all segments within a session are merged into flat event lists.
+### Live Confirm Format (`session_*.json`)
+
+Single session with segments at the top level:
+
+```json
+{
+  "sessionId": "abc-123",
+  "segments": [
+    {
+      "mouse": [{ "x": 100, "y": 200, "t": 1234.5 }],
+      "clicks": [...],
+      "keystrokes": [...],
+      "scroll": [...]
+    }
+  ]
+}
+```
+
+Segments are split by idle gaps (3+ seconds of inactivity). For training, all segments within a session are merged into flat event lists, then grouped into 30-event windows for the windowed observation encoder.
 
 ## Usage
 

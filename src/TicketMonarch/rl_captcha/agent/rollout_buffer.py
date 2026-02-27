@@ -22,10 +22,12 @@ class RolloutBuffer:
 
     capacity: int = 2048
     obs_dim: int = 13
+    action_dim: int = 7
 
     # Transition arrays (allocated in __post_init__)
     observations: np.ndarray = field(init=False)
     actions: np.ndarray = field(init=False)
+    action_masks: np.ndarray = field(init=False)
     rewards: np.ndarray = field(init=False)
     dones: np.ndarray = field(init=False)
     log_probs: np.ndarray = field(init=False)
@@ -44,6 +46,7 @@ class RolloutBuffer:
     def __post_init__(self):
         self.observations = np.zeros((self.capacity, self.obs_dim), dtype=np.float32)
         self.actions = np.zeros(self.capacity, dtype=np.int64)
+        self.action_masks = np.ones((self.capacity, self.action_dim), dtype=np.float32)
         self.rewards = np.zeros(self.capacity, dtype=np.float32)
         self.dones = np.zeros(self.capacity, dtype=np.float32)
         self.log_probs = np.zeros(self.capacity, dtype=np.float32)
@@ -72,10 +75,13 @@ class RolloutBuffer:
         done: bool,
         log_prob: float,
         value: float,
+        action_mask: np.ndarray | None = None,
     ):
         """Store one transition."""
         self.observations[self.ptr] = obs
         self.actions[self.ptr] = action
+        if action_mask is not None:
+            self.action_masks[self.ptr] = action_mask
         self.rewards[self.ptr] = reward
         self.dones[self.ptr] = float(done)
         self.log_probs[self.ptr] = log_prob
@@ -126,6 +132,7 @@ class RolloutBuffer:
             segments.append({
                 "obs": torch.from_numpy(self.observations[start_idx:end_idx].copy()),
                 "actions": torch.from_numpy(self.actions[start_idx:end_idx].copy()),
+                "action_masks": torch.from_numpy(self.action_masks[start_idx:end_idx].copy()),
                 "old_log_probs": torch.from_numpy(self.log_probs[start_idx:end_idx].copy()),
                 "advantages": torch.from_numpy(self.advantages[start_idx:end_idx].copy()),
                 "returns": torch.from_numpy(self.returns[start_idx:end_idx].copy()),

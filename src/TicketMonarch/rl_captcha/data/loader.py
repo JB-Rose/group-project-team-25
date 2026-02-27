@@ -235,7 +235,7 @@ def _load_flexible_json(path: Path, label: int) -> list[Session]:
         first_val = next(iter(data.values()), None) if data else None
 
         if isinstance(first_val, dict) and "segments" in first_val:
-            # Chrome extension export format
+            # Chrome extension export format: { "<sessionId>": { segments: [...] } }
             for sid, session_data in data.items():
                 mouse, clicks, keystrokes, scroll = [], [], [], []
                 for seg in session_data.get("segments", []):
@@ -256,6 +256,28 @@ def _load_flexible_json(path: Path, label: int) -> list[Session]:
                         "page_meta": session_data.get("pageMeta", []),
                     },
                 ))
+        elif "segments" in data and isinstance(data.get("segments"), list):
+            # Live-confirm / webapp export format:
+            # { "sessionId": "...", "segments": [{ "mouse": [...], ... }] }
+            sid = data.get("session_id", data.get("sessionId", path.stem))
+            mouse, clicks, keystrokes, scroll = [], [], [], []
+            for seg in data["segments"]:
+                mouse.extend(seg.get("mouse", []))
+                clicks.extend(seg.get("clicks", []))
+                keystrokes.extend(seg.get("keystrokes", []))
+                scroll.extend(seg.get("scroll", []))
+            sessions.append(Session(
+                session_id=sid,
+                label=data.get("label", label),
+                mouse=mouse,
+                clicks=clicks,
+                keystrokes=keystrokes,
+                scroll=scroll,
+                metadata={
+                    "source": data.get("source", "live_confirm"),
+                    "source_file": str(path.name),
+                },
+            ))
         else:
             # Single flat session object
             sid = data.get("session_id", data.get("sessionId", path.stem))

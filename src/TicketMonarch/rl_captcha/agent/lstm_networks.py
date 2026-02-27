@@ -27,16 +27,22 @@ class LSTMActorCritic(nn.Module):
             batch_first = True,
         )
 
+        self.lstm_dropout = nn.Dropout(0.1) if num_layers > 1 else nn.Identity()
+
         self.actor = nn.Sequential(
-            nn.Linear(hidden_size,64),
+            nn.Linear(hidden_size, 128),
+            nn.Tanh(),
+            nn.Linear(128, 64),
             nn.Tanh(),
             nn.Linear(64, action_dim),
         )
 
         self.critic = nn.Sequential(
-            nn.Linear(hidden_size, 64),
+            nn.Linear(hidden_size, 128),
             nn.Tanh(),
-            nn.Linear(64,1),
+            nn.Linear(128, 64),
+            nn.Tanh(),
+            nn.Linear(64, 1),
         )
     
     # hidden compressed memory
@@ -54,13 +60,15 @@ class LSTMActorCritic(nn.Module):
         self,
         x: torch.Tensor,
         hidden: Tuple[torch.Tensor, torch.Tensor],
+        action_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         squeeze = False
         if x.dim() == 2:
             x = x.unsqueeze(1)
             squeeze = True
 
-        lstm_out, new_hidden = self.lstm(x,hidden)
+        lstm_out, new_hidden = self.lstm(x, hidden)
+        lstm_out = self.lstm_dropout(lstm_out)
 
         logits = self.actor(lstm_out)
         values = self.critic(lstm_out)
@@ -68,6 +76,10 @@ class LSTMActorCritic(nn.Module):
         if squeeze:
             logits = logits.squeeze(1)
             values = values.squeeze(1)
+
+        # Apply action mask: set invalid actions to -inf so softmax gives 0
+        if action_mask is not None:
+            logits = logits.masked_fill(action_mask == 0, float("-inf"))
 
         return logits, values, new_hidden
     

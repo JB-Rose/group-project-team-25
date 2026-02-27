@@ -1,15 +1,16 @@
-"""Event-level Gymnasium environment for CAPTCHA defender with LSTM agent.
+"""Windowed Gymnasium environment for CAPTCHA defender with LSTM agent.
 
-Each timestep = one telemetry event (mouse move, click, keystroke, scroll).
-The agent processes raw events through its LSTM and decides an action at
-every event. Most actions should be 'continue' (action 0). Terminal actions
-end the episode.
+Each timestep = one WINDOW of telemetry events (e.g., 30 events grouped).
+The agent processes statistical features computed over each window through
+its LSTM and decides an action per window. Terminal actions end the episode.
 
-No feature extraction, no classifier — the LSTM learns its own features.
+Window features capture discriminative behavioral patterns (speed variance,
+click timing regularity, path curvature, etc.) that single events cannot.
 """
 
 from __future__ import annotations
 
+import math
 import random
 from typing import Any, Sequence
 
@@ -25,7 +26,7 @@ ACTION_NAMES = [
     "allow", "block",
 ]
 
-# Event type indices for one-hot encoding
+# Event type indices
 EVENT_MOUSE = 0
 EVENT_CLICK = 1
 EVENT_KEY_DOWN = 2
@@ -35,12 +36,243 @@ EVENT_SCROLL = 4
 INTERACTIVE_TAGS = {"INPUT", "BUTTON", "A", "SELECT", "TEXTAREA"}
 
 
-class EventEnv(gym.Env):
-    """Event-level CAPTCHA environment.
+def _safe_var(arr: list[float]) -> float:
+    """Variance with fallback for empty/single-element lists."""
+    if len(arr) < 2:
+        return 0.0
+    mean = sum(arr) / len(arr)
+    return sum((x - mean) ** 2 for x in arr) / (len(arr) - 1)
 
-    Observation: 13-dim encoded event vector.
+
+def _safe_mean(arr: list[float]) -> float:
+    return sum(arr) / len(arr) if arr else 0.0
+
+
+class EventEncoder:
+    """Encodes a window of raw events into a fixed-size feature vector.
+
+    26-dimensional windowed feature vector:
+        [0]  mouse_event_ratio      — fraction of events that are mouse moves
+        [1]  click_event_ratio      — fraction that are clicks
+        [2]  key_event_ratio        — fraction that are keystrokes
+        [3]  scroll_event_ratio     — fraction that are scrolls
+        [4]  mean_mouse_speed       — avg mouse speed (px/s, normalized)
+        [5]  var_mouse_speed        — speed variance (bots have LOW variance)
+        [6]  mean_mouse_accel       — avg acceleration (direction changes)
+        [7]  path_curvature         — ratio of path length to displacement
+        [8]  mean_dt                — avg time between events (normalized)
+        [9]  var_dt                 — timing variance (bots have LOW variance)
+        [10] min_dt                 — minimum inter-event time
+        [11] mean_click_dt          — avg time between consecutive clicks
+        [12] var_click_dt           — click timing variance
+        [13] mean_key_hold          — avg keystroke hold duration
+        [14] var_key_hold           — keystroke hold variance
+        [15] mean_key_interval      — avg time between key presses
+        [16] var_key_interval       — key interval variance
+        [17] scroll_total_dy        — total scroll distance in window
+        [18] scroll_direction_changes — number of scroll direction reversals
+        [19] unique_x_positions     — number of distinct x coords (normalized)
+        [20] unique_y_positions     — number of distinct y coords (normalized)
+        [21] x_range                — max-min x spread (normalized)
+        [22] y_range                — max-min y spread (normalized)
+        [23] interactive_click_ratio — fraction of clicks on interactive elements
+        [24] window_duration        — total time span of this window (normalized)
+        [25] event_count_norm       — actual event count / window_size
+    """
+
+    def __init__(self, config: EventEnvConfig):
+        self.config = config
+
+    def build_timeline(self, session: Session) -> list[dict]:
+        """Merge all events, subsample mouse, sort by timestamp."""
+        events = []
+
+        for i, evt in enumerate(session.mouse):
+            if i % self.config.mouse_subsample == 0:
+                events.append({"_type": EVENT_MOUSE, **evt})
+
+        for evt in session.clicks:
+            events.append({"_type": EVENT_CLICK, **evt})
+
+        for evt in session.keystrokes:
+            etype = EVENT_KEY_DOWN if evt.get("type") == "down" else EVENT_KEY_UP
+            events.append({"_type": etype, **evt})
+
+        for evt in session.scroll:
+            events.append({"_type": EVENT_SCROLL, **evt})
+
+        events.sort(key=lambda e: e.get("t", e.get("timestamp", 0)))
+
+        return events
+
+    def encode_window(self, events: list[dict]) -> np.ndarray:
+        """Encode a window of events into a 26-dim feature vector."""
+        cfg = self.config
+        vec = np.zeros(cfg.event_dim, dtype=np.float32)
+        n = len(events)
+        if n == 0:
+            return vec
+
+        # Count event types
+        n_mouse = sum(1 for e in events if e["_type"] == EVENT_MOUSE)
+        n_click = sum(1 for e in events if e["_type"] == EVENT_CLICK)
+        n_key = sum(1 for e in events if e["_type"] in (EVENT_KEY_DOWN, EVENT_KEY_UP))
+        n_scroll = sum(1 for e in events if e["_type"] == EVENT_SCROLL)
+
+        # [0-3] Event type ratios
+        vec[0] = n_mouse / n
+        vec[1] = n_click / n
+        vec[2] = n_key / n
+        vec[3] = n_scroll / n
+
+        # ── Mouse features [4-7] ─────────────────────────────────────
+        mouse_events = [e for e in events if e["_type"] == EVENT_MOUSE]
+        speeds = []
+        accels = []
+        path_length = 0.0
+        if len(mouse_events) >= 2:
+            prev_speed = 0.0
+            for i in range(1, len(mouse_events)):
+                prev = mouse_events[i - 1]
+                curr = mouse_events[i]
+                x0 = prev.get("x", prev.get("pageX", 0)) or 0
+                y0 = prev.get("y", prev.get("pageY", 0)) or 0
+                x1 = curr.get("x", curr.get("pageX", 0)) or 0
+                y1 = curr.get("y", curr.get("pageY", 0)) or 0
+                t0 = prev.get("t", prev.get("timestamp", 0)) or 0
+                t1 = curr.get("t", curr.get("timestamp", 0)) or 0
+                dt_s = max((t1 - t0) / 1000.0, 1e-6)
+                dist = math.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2)
+                path_length += dist
+                speed = dist / dt_s
+                speeds.append(speed)
+                accels.append(abs(speed - prev_speed) / dt_s)
+                prev_speed = speed
+
+            vec[4] = min(_safe_mean(speeds), cfg.max_speed) / cfg.max_speed
+            vec[5] = min(_safe_var(speeds), cfg.max_speed ** 2) / (cfg.max_speed ** 2)
+            vec[6] = min(_safe_mean(accels), cfg.max_speed * 10) / (cfg.max_speed * 10)
+
+            # Path curvature: path_length / straight-line displacement
+            first = mouse_events[0]
+            last = mouse_events[-1]
+            x0 = first.get("x", first.get("pageX", 0)) or 0
+            y0 = first.get("y", first.get("pageY", 0)) or 0
+            x1 = last.get("x", last.get("pageX", 0)) or 0
+            y1 = last.get("y", last.get("pageY", 0)) or 0
+            displacement = math.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2)
+            if displacement > 1.0:
+                vec[7] = min(path_length / displacement, 10.0) / 10.0
+            elif path_length > 0:
+                vec[7] = 1.0  # moved but ended up in same place
+
+        # ── Timing features [8-10] ───────────────────────────────────
+        dts = []
+        for i in range(1, n):
+            t0 = events[i - 1].get("t", events[i - 1].get("timestamp", 0)) or 0
+            t1 = events[i].get("t", events[i].get("timestamp", 0)) or 0
+            dts.append(max(t1 - t0, 0))
+        if dts:
+            vec[8] = math.log1p(min(_safe_mean(dts), cfg.max_dt_ms)) / math.log1p(cfg.max_dt_ms)
+            vec[9] = min(_safe_var(dts), cfg.max_dt_ms ** 2) / (cfg.max_dt_ms ** 2)
+            vec[10] = math.log1p(min(min(dts), cfg.max_dt_ms)) / math.log1p(cfg.max_dt_ms)
+
+        # ── Click timing [11-12] ─────────────────────────────────────
+        click_times = [
+            e.get("t", e.get("timestamp", 0)) or 0
+            for e in events if e["_type"] == EVENT_CLICK
+        ]
+        if len(click_times) >= 2:
+            click_dts = [click_times[i] - click_times[i - 1] for i in range(1, len(click_times))]
+            vec[11] = math.log1p(min(_safe_mean(click_dts), cfg.max_dt_ms)) / math.log1p(cfg.max_dt_ms)
+            vec[12] = min(_safe_var(click_dts), cfg.max_dt_ms ** 2) / (cfg.max_dt_ms ** 2)
+
+        # ── Keystroke features [13-16] ───────────────────────────────
+        key_downs = {}
+        key_holds = []
+        key_down_times = []
+        for e in events:
+            if e["_type"] == EVENT_KEY_DOWN:
+                key = e.get("key", e.get("field", ""))
+                t = e.get("t", e.get("timestamp", 0)) or 0
+                key_downs[key] = t
+                key_down_times.append(t)
+            elif e["_type"] == EVENT_KEY_UP:
+                key = e.get("key", e.get("field", ""))
+                t = e.get("t", e.get("timestamp", 0)) or 0
+                if key in key_downs:
+                    hold = t - key_downs[key]
+                    if 0 < hold < 2000:
+                        key_holds.append(hold)
+                    del key_downs[key]
+
+        if key_holds:
+            vec[13] = min(_safe_mean(key_holds), 1000) / 1000
+            vec[14] = min(_safe_var(key_holds), 1e6) / 1e6
+        if len(key_down_times) >= 2:
+            key_intervals = [key_down_times[i] - key_down_times[i - 1] for i in range(1, len(key_down_times))]
+            vec[15] = math.log1p(min(_safe_mean(key_intervals), cfg.max_dt_ms)) / math.log1p(cfg.max_dt_ms)
+            vec[16] = min(_safe_var(key_intervals), cfg.max_dt_ms ** 2) / (cfg.max_dt_ms ** 2)
+
+        # ── Scroll features [17-18] ──────────────────────────────────
+        scroll_dys = [
+            (e.get("dy", 0) or 0) for e in events if e["_type"] == EVENT_SCROLL
+        ]
+        if scroll_dys:
+            vec[17] = np.clip(sum(abs(d) for d in scroll_dys) / (cfg.max_scroll_dy * 10), 0, 1)
+            direction_changes = sum(
+                1 for i in range(1, len(scroll_dys))
+                if scroll_dys[i] * scroll_dys[i - 1] < 0
+            )
+            vec[18] = min(direction_changes, 10) / 10
+
+        # ── Spatial features [19-22] ─────────────────────────────────
+        all_x = []
+        all_y = []
+        for e in events:
+            x = e.get("x", e.get("pageX", None))
+            y = e.get("y", e.get("pageY", None))
+            if x is not None and y is not None:
+                all_x.append(x)
+                all_y.append(y)
+        if all_x:
+            unique_x = len(set(int(x / 10) for x in all_x))  # bin to 10px
+            unique_y = len(set(int(y / 10) for y in all_y))
+            vec[19] = min(unique_x, 100) / 100
+            vec[20] = min(unique_y, 100) / 100
+            vec[21] = (max(all_x) - min(all_x)) / cfg.max_coord_x
+            vec[22] = (max(all_y) - min(all_y)) / cfg.max_coord_y
+
+        # ── Interaction quality [23] ─────────────────────────────────
+        clicks_on_interactive = 0
+        total_clicks = 0
+        for e in events:
+            if e["_type"] == EVENT_CLICK:
+                total_clicks += 1
+                target = e.get("target", {})
+                if isinstance(target, dict):
+                    tag = (target.get("tag") or "").upper()
+                    if tag in INTERACTIVE_TAGS:
+                        clicks_on_interactive += 1
+        if total_clicks > 0:
+            vec[23] = clicks_on_interactive / total_clicks
+
+        # ── Window metadata [24-25] ──────────────────────────────────
+        t_first = events[0].get("t", events[0].get("timestamp", 0)) or 0
+        t_last = events[-1].get("t", events[-1].get("timestamp", 0)) or 0
+        duration = max(t_last - t_first, 0)
+        vec[24] = math.log1p(min(duration, 60000)) / math.log1p(60000)
+        vec[25] = len(events) / cfg.window_size
+
+        return vec
+
+
+class EventEnv(gym.Env):
+    """Windowed CAPTCHA environment.
+
+    Observation: 26-dim windowed feature vector.
     Action: 7 discrete (continue, honeypot, 3 puzzles, allow, block).
-    Episode: one user session's events presented sequentially.
+    Episode: one user session's event windows presented sequentially.
     """
 
     metadata = {"render_modes": ["human"]}
@@ -53,6 +285,7 @@ class EventEnv(gym.Env):
         super().__init__()
         self.config = config or EventEnvConfig()
         self._sessions = list(sessions)
+        self._encoder = EventEncoder(self.config)
 
         # Separate by label for balanced sampling
         self._human_sessions = [s for s in self._sessions if s.label == 1]
@@ -66,16 +299,24 @@ class EventEnv(gym.Env):
         self.action_space = gym.spaces.Discrete(7)
 
         # Per-episode state
-        self._timeline: list[dict] = []
-        self._event_idx: int = 0
+        self._windows: list[list[dict]] = []
+        self._window_idx: int = 0
         self._current_session: Session | None = None
         self._honeypot_deployed: bool = False
         self._honeypot_triggered: bool = False
         self._num_honeypots: int = 0
         self._honeypot_info_bonus_pending: float = 0.0
-        self._prev_mouse_x: float = 0.0
-        self._prev_mouse_y: float = 0.0
-        self._prev_mouse_t: float = 0.0
+
+    # Action masks: which actions are valid on non-final vs final windows
+    # Non-final: only continue (0) and honeypot (1)
+    NON_FINAL_MASK = np.array([1, 1, 0, 0, 0, 0, 0], dtype=np.float32)
+    # Final: only terminal actions — puzzles (2,3,4), allow (5), block (6)
+    FINAL_MASK = np.array([0, 0, 1, 1, 1, 1, 1], dtype=np.float32)
+
+    def _get_action_mask(self) -> np.ndarray:
+        """Return valid action mask for current window position."""
+        is_final = self._window_idx >= len(self._windows) - 1
+        return self.FINAL_MASK.copy() if is_final else self.NON_FINAL_MASK.copy()
 
     def reset(
         self,
@@ -94,31 +335,46 @@ class EventEnv(gym.Env):
             session = random.choice(self._sessions)
 
         self._current_session = session
-        self._event_idx = 0
+        self._window_idx = 0
         self._honeypot_deployed = False
         self._honeypot_triggered = False
         self._num_honeypots = 0
         self._honeypot_info_bonus_pending = 0.0
-        self._prev_mouse_x = 0.0
-        self._prev_mouse_y = 0.0
-        self._prev_mouse_t = 0.0
 
-        self._timeline = self._build_timeline(session)
+        timeline = self._encoder.build_timeline(session)
+
+        # Split timeline into overlapping windows
+        ws = self.config.window_size
+        stride = ws // 2  # 50% overlap for smoother transitions
+        self._windows = []
+        for start in range(0, len(timeline), stride):
+            window = timeline[start:start + ws]
+            if len(window) >= self.config.min_events:
+                self._windows.append(window)
 
         info = {
             "session_id": session.session_id,
             "true_label": session.label,
-            "total_events": len(self._timeline),
+            "total_events": len(timeline),
+            "total_windows": len(self._windows),
         }
 
-        if len(self._timeline) < self.config.min_events:
+        if not self._windows:
             info["too_short"] = True
+            mask = self.FINAL_MASK.copy()
+            info["action_mask"] = mask
             return np.zeros(self.config.event_dim, dtype=np.float32), info
 
-        obs = self._encode_event(self._timeline[0])
+        obs = self._encoder.encode_window(self._windows[0])
+        info["action_mask"] = self._get_action_mask()
         return obs, info
 
     def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict]:
+        """Execute one step. Action masking is enforced by the agent, not here.
+
+        Non-final windows: agent picks continue (0) or honeypot (1).
+        Final window: agent picks a terminal action (2-6).
+        """
         assert self._current_session is not None
         cfg = self.config
         true_label = self._current_session.label  # 1=human, 0=bot
@@ -132,7 +388,7 @@ class EventEnv(gym.Env):
         reward += self._honeypot_info_bonus_pending
         self._honeypot_info_bonus_pending = 0.0
 
-        if action == 0:  # continue
+        if action == 0:  # continue — observe more
             reward -= cfg.continue_penalty
             outcome = "continue"
 
@@ -157,7 +413,7 @@ class EventEnv(gym.Env):
                 else:
                     outcome = "honeypot_no_trigger"
 
-        elif action in (2, 3, 4):  # puzzle
+        elif action in (2, 3, 4):  # puzzle — terminal
             terminated = True
             human_pass, bot_pass = cfg.puzzle_pass_rates[action]
             if true_label == 1:
@@ -172,7 +428,7 @@ class EventEnv(gym.Env):
                     outcome = "bot_blocked_puzzle"
             reward -= cfg.action_costs[action]
 
-        elif action == 5:  # allow
+        elif action == 5:  # allow — terminal
             terminated = True
             if true_label == 1:
                 reward = cfg.reward_correct_allow
@@ -181,7 +437,7 @@ class EventEnv(gym.Env):
                 reward = cfg.penalty_false_negative
                 outcome = "false_negative"
 
-        elif action == 6:  # block
+        elif action == 6:  # block — terminal
             terminated = True
             if true_label == 0:
                 reward = cfg.reward_correct_block
@@ -190,19 +446,22 @@ class EventEnv(gym.Env):
                 reward = cfg.penalty_false_positive
                 outcome = "false_positive_block"
 
-        # Advance to next event for non-terminal actions
+        # Advance to next window for non-terminal actions
         if not terminated:
-            self._event_idx += 1
-            if self._event_idx >= len(self._timeline):
+            self._window_idx += 1
+            if self._window_idx >= len(self._windows):
+                # Should not happen with proper masking (final window forces terminal)
                 truncated = True
                 reward += cfg.truncation_penalty
                 outcome = "truncated"
 
-        # Build next observation
+        # Build next observation and action mask
         if terminated or truncated:
             obs = np.zeros(cfg.event_dim, dtype=np.float32)
+            action_mask = self.FINAL_MASK.copy()
         else:
-            obs = self._encode_event(self._timeline[self._event_idx])
+            obs = self._encoder.encode_window(self._windows[self._window_idx])
+            action_mask = self._get_action_mask()
 
         info = {
             "session_id": self._current_session.session_id,
@@ -210,92 +469,10 @@ class EventEnv(gym.Env):
             "action": ACTION_NAMES[action],
             "outcome": outcome,
             "reward": reward,
-            "event_idx": self._event_idx,
-            "total_events": len(self._timeline),
+            "window_idx": self._window_idx,
+            "total_windows": len(self._windows),
             "honeypot_deployed": self._honeypot_deployed,
             "honeypot_triggered": self._honeypot_triggered,
+            "action_mask": action_mask,
         }
         return obs, reward, terminated, truncated, info
-
-    def _build_timeline(self, session: Session) -> list[dict]:
-        """Merge all events, subsample mouse, sort by timestamp."""
-        events = []
-
-        for i, evt in enumerate(session.mouse):
-            if i % self.config.mouse_subsample == 0:
-                events.append({"_type": EVENT_MOUSE, **evt})
-
-        for evt in session.clicks:
-            events.append({"_type": EVENT_CLICK, **evt})
-
-        for evt in session.keystrokes:
-            etype = EVENT_KEY_DOWN if evt.get("type") == "down" else EVENT_KEY_UP
-            events.append({"_type": etype, **evt})
-
-        for evt in session.scroll:
-            events.append({"_type": EVENT_SCROLL, **evt})
-
-        events.sort(key=lambda e: e.get("t", e.get("timestamp", 0)))
-
-        if len(events) > self.config.max_events:
-            events = events[: self.config.max_events]
-
-        return events
-
-    def _encode_event(self, evt: dict) -> np.ndarray:
-        """Encode a single raw event into a 13-dim vector."""
-        cfg = self.config
-        vec = np.zeros(cfg.event_dim, dtype=np.float32)
-        etype = evt["_type"]
-
-        # Dims 0-4: event type one-hot
-        vec[etype] = 1.0
-
-        # Dims 5-6: normalized coordinates
-        x = evt.get("x", evt.get("pageX", 0.0)) or 0.0
-        y = evt.get("y", evt.get("pageY", 0.0)) or 0.0
-        vec[5] = x / cfg.max_coord_x
-        vec[6] = y / cfg.max_coord_y
-
-        # Dim 7: log-normalized dt_since_last
-        dt = evt.get("dt_since_last")
-        if dt is None or not isinstance(dt, (int, float)):
-            dt = 0.0
-        dt = max(dt, 0.0)
-        vec[7] = np.log1p(min(dt, cfg.max_dt_ms)) / np.log1p(cfg.max_dt_ms)
-
-        # Dim 8: mouse speed (computed incrementally from consecutive mouse events)
-        if etype == EVENT_MOUSE:
-            t = evt.get("t", 0.0)
-            if self._prev_mouse_t > 0 and t > self._prev_mouse_t:
-                dt_s = (t - self._prev_mouse_t) / 1000.0
-                dist = np.sqrt(
-                    (x - self._prev_mouse_x) ** 2 + (y - self._prev_mouse_y) ** 2
-                )
-                speed = dist / max(dt_s, 1e-6)
-                vec[8] = min(speed, cfg.max_speed) / cfg.max_speed
-            self._prev_mouse_x = x
-            self._prev_mouse_y = y
-            self._prev_mouse_t = t
-
-        # Dim 9: scroll dy (normalized)
-        if etype == EVENT_SCROLL:
-            dy = evt.get("dy", 0.0) or 0.0
-            vec[9] = np.clip(dy / cfg.max_scroll_dy, -1.0, 1.0)
-
-        # Dim 10: is_special_key
-        if etype in (EVENT_KEY_DOWN, EVENT_KEY_UP):
-            vec[10] = 1.0 if evt.get("key") is not None else 0.0
-
-        # Dim 11: button_is_left
-        if etype == EVENT_CLICK:
-            vec[11] = 1.0 if evt.get("button") == "left" else 0.0
-
-        # Dim 12: target_is_interactive
-        if etype == EVENT_CLICK:
-            target = evt.get("target", {})
-            if isinstance(target, dict):
-                tag = (target.get("tag") or "").upper()
-                vec[12] = 1.0 if tag in INTERACTIVE_TAGS else 0.0
-
-        return vec

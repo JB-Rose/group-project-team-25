@@ -33,8 +33,8 @@ function Checkout() {
     state: '',
     country: 'U.S.A.',
     zip_code: '',
-    email_confirm: '',
-    phone_number: '',
+    company_url: '',
+    fax_number: '',
   })
 
   const [submitMessage, setSubmitMessage] = useState('')
@@ -336,26 +336,26 @@ function Checkout() {
 
             {/* honeypots (hidden) */}
             <div className={honeypotDeployed ? "honeypot-field honeypot-deployed" : "honeypot-field"} aria-hidden="true" tabIndex={-1}>
-              <label htmlFor="email_confirm">Confirm Email</label>
+              <label htmlFor="company_url">Company Website</label>
               <input
                 type="text"
-                id="email_confirm"
-                name="email_confirm"
-                value={formData.email_confirm}
+                id="company_url"
+                name="company_url"
+                value={formData.company_url}
                 onChange={handleChange}
-                autoComplete="off"
+                autoComplete="nope"
                 tabIndex={-1}
               />
             </div>
             <div className={honeypotDeployed ? "honeypot-field honeypot-deployed" : "honeypot-field"} aria-hidden="true" tabIndex={-1}>
-              <label htmlFor="phone_number">Phone Number</label>
+              <label htmlFor="fax_number">Fax Number</label>
               <input
-                type="tel"
-                id="phone_number"
-                name="phone_number"
-                value={formData.phone_number}
+                type="text"
+                id="fax_number"
+                name="fax_number"
+                value={formData.fax_number}
                 onChange={handleChange}
-                autoComplete="off"
+                autoComplete="nope"
                 tabIndex={-1}
               />
             </div>

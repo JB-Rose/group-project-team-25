@@ -416,38 +416,53 @@ This section documents the complete reinforcement learning system that powers bo
 Raw telemetry events (mouse, click, keystroke, scroll)
         │
         ▼
-Event Encoder (13-dimensional vector per event)
+Windowed Event Encoder (26-dimensional feature vector per window of 30 events)
+        │  Features: speed mean/variance, path curvature, click timing,
+        │  keystroke hold patterns, scroll behavior, spatial spread, etc.
         │
         ▼
-LSTM (128 hidden units) ── accumulates temporal evidence
+LSTM (256 hidden, 2 layers) ── accumulates temporal evidence across windows
         │
-        ├──► Actor head (128 → 64 → 7 logits) ──► action (policy)
-        └──► Critic head (128 → 64 → 1 value)  ──► V(s) (value estimate)
+        ├──► Actor head (256 → 128 → 64 → 7 logits) ──► action (policy)
+        └──► Critic head (256 → 128 → 64 → 1 value)  ──► V(s) (value estimate)
 ```
 
-The LSTM processes events sequentially. At every timestep (event), the agent chooses one of 7 actions. Most of the time it chooses `continue` (keep watching). When it has seen enough evidence, it makes a terminal decision: allow, block, or deploy a puzzle challenge.
+The LSTM processes **windows of events** sequentially. Each window contains 30 events and is encoded into a 26-dimensional statistical feature vector capturing behavioral patterns (speed variance, timing regularity, path curvature, etc.) that single events cannot represent. At every timestep (window), the agent chooses one of 7 actions. Most of the time it chooses `continue` (keep watching). When it has seen enough evidence, it makes a terminal decision: allow, block, or deploy a puzzle challenge.
 
 ---
 
 ### State Representation (Observation Space)
 
-Each raw telemetry event is encoded into a **13-dimensional float vector**:
+Events are grouped into **windows of 30 events** (with 50% overlap) and each window is encoded into a **26-dimensional statistical feature vector**:
 
-| Dimensions | Content | Encoding |
-|-----------|---------|----------|
-| 0–4 | Event type | One-hot: `[mouse, click, key_down, key_up, scroll]` |
-| 5 | X coordinate | Normalized by screen width: `x / 1920.0` |
-| 6 | Y coordinate | Normalized by screen height: `y / 1080.0` |
-| 7 | Time since last event | Log-normalized: `log1p(min(dt, 5000)) / log1p(5000)` |
-| 8 | Mouse speed | Computed incrementally between consecutive mouse events, normalized by 5000 px/s |
-| 9 | Scroll delta Y | Clipped to `[-1.0, 1.0]` after dividing by 500 px |
-| 10 | Special key flag | `1.0` if the keystroke event has a named key (Backspace, Enter, Arrow, etc.) |
-| 11 | Left-click flag | `1.0` if click button is `"left"` |
-| 12 | Interactive target flag | `1.0` if click target tag is `INPUT`, `BUTTON`, `A`, `SELECT`, or `TEXTAREA` |
+| Dimensions | Feature | Why it matters |
+|-----------|---------|----------------|
+| 0–3 | Event type ratios | Fraction of mouse/click/key/scroll events in the window |
+| 4 | Mean mouse speed | Bots tend to have unnaturally constant speed |
+| 5 | Mouse speed variance | **Key discriminator** — bots have near-zero variance |
+| 6 | Mean mouse acceleration | Direction change rate |
+| 7 | Path curvature | Ratio of path length to displacement — bots move in straight lines |
+| 8 | Mean inter-event time | Average time between events |
+| 9 | Inter-event time variance | **Key discriminator** — bots have uniform timing |
+| 10 | Min inter-event time | Fastest event gap (bots can be inhumanly fast) |
+| 11 | Mean click interval | Average time between consecutive clicks |
+| 12 | Click interval variance | Bots click at regular intervals |
+| 13 | Mean keystroke hold | Average key press duration |
+| 14 | Keystroke hold variance | Bots have mechanical, uniform key holds |
+| 15 | Mean key-press interval | Time between consecutive key presses |
+| 16 | Key-press interval variance | Typing rhythm regularity |
+| 17 | Total scroll distance | Absolute scroll amount in the window |
+| 18 | Scroll direction changes | Number of up/down reversals |
+| 19–20 | Unique x/y positions | Spatial diversity (binned to 10px) |
+| 21–22 | X/Y range | Spatial spread normalized by screen size |
+| 23 | Interactive click ratio | Fraction of clicks on INPUT/BUTTON/A/SELECT/TEXTAREA |
+| 24 | Window duration | Time span of the window (log-normalized) |
+| 25 | Event count ratio | Actual events / window_size |
 
 **Preprocessing before encoding:**
 - Mouse events are subsampled: every 5th event is kept (66 Hz → ~13 Hz)
 - All event types are merged into a single timeline and sorted by timestamp
+- Timeline is split into overlapping windows (stride = 15 events)
 - Episodes are capped at 500 events maximum
 - Sessions with fewer than 10 events are skipped
 
@@ -537,36 +552,42 @@ This means harder puzzles are more effective at catching bots but risk more fals
 ### Network Architecture
 
 ```
-Input: (batch, seq_len, 13)
+Input: (batch, seq_len, 26)   ← windowed feature vectors
               │
               ▼
-     ┌─────────────────┐
-     │  LSTM Layer      │
-     │  input:  13      │
-     │  hidden: 128     │
-     │  layers: 1       │
-     │  batch_first     │
-     └────────┬────────┘
-              │ (batch, seq_len, 128)
+     ┌──────────────────┐
+     │  LSTM Layer ×2    │
+     │  input:  26       │
+     │  hidden: 256      │
+     │  layers: 2        │
+     │  batch_first      │
+     │  + dropout 0.1    │
+     └────────┬─────────┘
+              │ (batch, seq_len, 256)
               │
        ┌──────┴──────┐
        ▼              ▼
-┌─────────────┐ ┌─────────────┐
-│ Actor Head  │ │ Critic Head │
+┌───────────────┐ ┌───────────────┐
+│  Actor Head   │ │  Critic Head  │
+│ Linear(256→128)│ │ Linear(256→128)│
+│ Tanh          │ │ Tanh          │
 │ Linear(128→64)│ │ Linear(128→64)│
-│ Tanh        │ │ Tanh        │
-│ Linear(64→7)│ │ Linear(64→1)│
-└─────────────┘ └─────────────┘
+│ Tanh          │ │ Tanh          │
+│ Linear(64→7)  │ │ Linear(64→1)  │
+└───────────────┘ └───────────────┘
        │              │
        ▼              ▼
   action logits   value V(s)
     (7-dim)        (scalar)
 ```
 
-- **~100K total parameters** — intentionally small for fast CPU inference
-- **LSTM hidden state** carries temporal context across the entire session
+- **~900K total parameters** — still fast on CPU but with much more capacity
+- **2-layer LSTM** with dropout between layers for regularization
+- **LSTM hidden state** (h ∈ ℝ²⁵⁶) carries temporal context across windows
+- **Cell state** (c ∈ ℝ²⁵⁶) stores long-range behavioral patterns
 - The actor outputs a probability distribution over 7 actions (softmax of logits)
 - The critic estimates the expected future reward from the current state
+- **Deeper heads** (3 linear layers each) allow more expressive decision boundaries
 
 ---
 
@@ -610,10 +631,11 @@ The trained agent is loaded by `agent_service.py` in the Flask backend. Three in
 
 Called when the user clicks "Purchase" at checkout.
 
-1. Encodes all telemetry events into the 13-dim representation
-2. Runs the entire sequence through the LSTM in a single batched forward pass
-3. Takes the **last 10% of events** (minimum 5) and averages their action probabilities — this gives the LSTM's most informed assessment after processing all evidence
-4. Applies a confidence threshold:
+1. Builds a timeline from raw telemetry, splits into overlapping windows of 30 events
+2. Encodes each window into the 26-dim statistical feature vector
+3. Runs the entire window sequence through the LSTM in a single batched forward pass
+4. Takes the **last 30% of windows** (minimum 2) and averages their action probabilities — this gives the LSTM's most informed assessment after processing all evidence
+5. Applies a confidence threshold:
    - If `p_suspicious > 0.45` (sum of puzzle + block probabilities):
      - `p_block > 0.4` or `p_hard_puzzle > 0.25` → hard puzzle
      - Otherwise → medium or easy puzzle based on which has higher probability
@@ -623,21 +645,24 @@ Called when the user clicks "Purchase" at checkout.
 
 Called every 3 seconds during the checkout flow for live monitoring.
 
-1. Processes all events collected so far
-2. Takes the **last 20% of events** (minimum 5)
-3. Applies **exponential weighting** — more recent events count more heavily
+1. Processes all events collected so far, split into windows
+2. Takes the **last 30% of windows** (minimum 2)
+3. Applies **exponential weighting** — more recent windows count more heavily
 4. Returns a `bot_probability` score and whether to `deploy_honeypot`
 5. Used by the frontend to show real-time suspicion levels on the Dev Dashboard
 
 #### 3. Online Learning (`online_learn`)
 
-Called after a session is confirmed as human or bot (e.g., after bot runs, or after the confirmation page).
+Called after a session is labeled as human or bot (via bot scripts or the `/api/agent/confirm` endpoint).
 
-1. Replays all events through the agent, collecting actions and rewards
-2. Final event receives the true-label reward (correct/incorrect allow/block)
-3. Runs a **gentle PPO update**: 1 epoch only, learning rate reduced to 1/5th of training rate (6×10⁻⁵)
-4. Saves the updated checkpoint immediately
-5. This allows the model to continuously improve from real-world sessions
+1. Evaluates the session **before** the update (captures before-decision)
+2. Replays all windows through the agent, collecting actions and rewards
+3. Final window receives the true-label reward (correct/incorrect allow/block)
+4. Runs an **aggressive PPO update**: 3 epochs, learning rate at 60% of training rate (1.8×10⁻⁴)
+5. Evaluates the session **after** the update (captures after-decision)
+6. Logs before/after comparison to `online_training.log` with IMPROVED/UNCHANGED/REGRESSED status
+7. Saves the updated checkpoint immediately
+8. This allows the model to continuously improve from real-world sessions
 
 ---
 

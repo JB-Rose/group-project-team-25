@@ -87,15 +87,18 @@ def _run_evaluation(
         steps = 0
         actions_taken = []
 
+        action_mask = info.get("action_mask")
         done = False
         while not done:
-            action, _, _ = agent.select_action(obs, deterministic=True)
-            obs, reward, terminated, truncated, info = env.step(action)
+            action, _, _ = agent.select_action(obs, action_mask=action_mask, deterministic=True)
+            obs, reward, terminated, truncated, step_info = env.step(action)
             done = terminated or truncated
 
             total_reward += reward
             steps += 1
             actions_taken.append(action)
+            action_mask = step_info.get("action_mask")
+            info = step_info
 
         episode_data.append({
             "true_label": true_label,

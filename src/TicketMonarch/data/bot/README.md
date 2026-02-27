@@ -2,6 +2,8 @@
 
 Automated bot browsing sessions. Treated as **label=0 (bot)** by the training pipeline.
 
+**Important:** Only include bot data collected against the TicketMonarch site (localhost). Old bot data from other platforms or sites was removed during cleanup.
+
 ## How to Collect
 
 ### Selenium Bots
@@ -43,6 +45,8 @@ Files from the Chrome extension use the same format as human data — session ob
   }
 }
 ```
+
+For training, all segments within a session are merged into flat event lists, then grouped into 30-event windows for the windowed observation encoder.
 
 ## Usage
 
