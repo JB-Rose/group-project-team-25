@@ -1,35 +1,50 @@
 # Python
-.venv
-venv/
 __pycache__/
-*.pyc
-*.pyo
-
-# Environment
-.env
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+*.egg-info/
+dist/
+build/
 
 # Node
 node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
 
-# IDE / Editor
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
 
 # OS
-nul
 .DS_Store
 Thumbs.db
 
-# Build
-dist/
-build/
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
 
-# Model checkpoints — track the trained weights
-# (uncomment the line below to ignore them again if they get too large)
-*discard.pt
+# Build outputs
+frontend/dist/
+frontend/build/
 
-# Training data (large JSON telemetry files)
-data/human/*.json
-data/bot/*.json
+# Logs
+*.log
+
