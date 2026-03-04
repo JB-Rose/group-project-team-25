@@ -1,5 +1,10 @@
 import { Link } from 'react-router-dom'
 import './Home.css'
+import chappellImg from '../assets/images/chappell.jpg'
+import metallicaImg from '../assets/images/metallica.webp'
+import gagaImg from '../assets/images/gaga.webp'
+import linkinImg from '../assets/images/linkin.jpg'
+import taylorImg from '../assets/images/taylor.png'
 
 // real app fetch from api
 const concerts = [
@@ -9,7 +14,7 @@ const concerts = [
     date: 'Until Nov 16',
     eventName: 'Abono Banamex Plus Corona Capital 2025',
     location: 'México, CDMX, Mexico • Autodromo Hnos. Rodriguez',
-    image: 'https://via.placeholder.com/150/FF6B9D/FFFFFF?text=CR',
+    image: chappellImg,
     price: 100
   },
   {
@@ -18,7 +23,7 @@ const concerts = [
     date: 'Until Nov 16',
     eventName: 'Abono Banamex Plus Corona Capital 2025',
     location: 'México, CDMX, Mexico • Autodromo Hnos. Rodriguez',
-    image: 'https://via.placeholder.com/150/1A1A1A/FFFFFF?text=M',
+    image: metallicaImg,
     price: 250
   },
   {
@@ -27,7 +32,7 @@ const concerts = [
     date: 'Until Nov 16',
     eventName: 'Abono Banamex Plus Corona Capital 2025',
     location: 'México, CDMX, Mexico • Autodromo Hnos. Rodriguez',
-    image: 'https://via.placeholder.com/150/E91E63/FFFFFF?text=LG',
+    image: gagaImg,
     price: 200
   },
   {
@@ -36,7 +41,7 @@ const concerts = [
     date: 'Until Nov 16',
     eventName: 'Abono Banamex Plus Corona Capital 2025',
     location: 'México, CDMX, Mexico • Autodromo Hnos. Rodriguez',
-    image: 'https://via.placeholder.com/150/0066CC/FFFFFF?text=LP',
+    image: linkinImg,
     price: 180
   },
   {
@@ -45,7 +50,7 @@ const concerts = [
     date: 'Until Nov 16',
     eventName: 'Abono Banamex Plus Corona Capital 2025',
     location: 'México, CDMX, Mexico • Autodromo Hnos. Rodriguez',
-    image: 'https://via.placeholder.com/150/FFB6C1/FFFFFF?text=TS',
+    image: taylorImg,
     price: 300
   }
 ]

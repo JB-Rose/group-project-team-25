@@ -28,7 +28,7 @@ TicketMonarch/
 
 ## Quick Start (Full Setup)
 
-All commands assume you are in the `src/TicketMonarch/` directory.
+All commands assume you are in the `src/` directory.
 
 ### 1. Create and activate a virtual environment
 
