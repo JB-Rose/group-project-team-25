@@ -5,6 +5,9 @@ Usage:
         --agent rl_captcha/agent/checkpoints/ppo_run1 \
         --data-dir data/ \
         --episodes 500
+
+By default, evaluation uses the held-out TEST split (15% of data) with
+the same seed used during training, ensuring no overlap with training data.
 """
 
 from __future__ import annotations
@@ -15,7 +18,7 @@ from collections import defaultdict
 import numpy as np
 
 from rl_captcha.config import Config
-from rl_captcha.data.loader import load_from_directory
+from rl_captcha.data.loader import load_from_directory, split_sessions
 from rl_captcha.environment.event_env import EventEnv, ACTION_NAMES
 from rl_captcha.agent.ppo_lstm import PPOLSTM
 
@@ -28,6 +31,11 @@ def parse_args() -> argparse.Namespace:
                     help="Path to data directory with human/ and bot/ subdirs")
     p.add_argument("--episodes", type=int, default=500,
                     help="Number of episodes to evaluate")
+    p.add_argument("--split", type=str, default="test",
+                    choices=["test", "val", "train", "all"],
+                    help="Which data split to evaluate on (default: test)")
+    p.add_argument("--split-seed", type=int, default=42,
+                    help="Random seed for split (must match training)")
     p.add_argument("--device", type=str, default="auto")
     return p.parse_args()
 
@@ -47,8 +55,23 @@ def main():
         print("ERROR: No sessions found.")
         return
 
+    # Select split
+    if args.split == "all":
+        eval_sessions = sessions
+        print(f"  Evaluating on ALL {len(eval_sessions)} sessions")
+    else:
+        train_s, val_s, test_s = split_sessions(
+            sessions, train=0.70, val=0.15, test=0.15, seed=args.split_seed,
+        )
+        splits = {"train": train_s, "val": val_s, "test": test_s}
+        eval_sessions = splits[args.split]
+        h = sum(1 for s in eval_sessions if s.label == 1)
+        b = sum(1 for s in eval_sessions if s.label == 0)
+        print(f"  Evaluating on {args.split.upper()} split: "
+              f"{len(eval_sessions)} sessions ({h} human, {b} bot)")
+
     # Create environment and agent
-    env = EventEnv(sessions, config=cfg.event_env)
+    env = EventEnv(eval_sessions, config=cfg.event_env)
     agent = PPOLSTM(
         obs_dim=cfg.event_env.event_dim,
         action_dim=7,
@@ -62,7 +85,7 @@ def main():
 
     # Run evaluation
     results = _run_evaluation(env, agent, args.episodes)
-    _print_results(results)
+    _print_results(results, split_name=args.split)
 
 
 def _run_evaluation(
@@ -112,7 +135,7 @@ def _run_evaluation(
     return {"episodes": episode_data}
 
 
-def _print_results(results: dict):
+def _print_results(results: dict, split_name: str = "test"):
     """Print evaluation summary."""
     episodes = results["episodes"]
     n = len(episodes)
@@ -120,7 +143,7 @@ def _print_results(results: dict):
     rewards = [e["reward"] for e in episodes]
     lengths = [e["steps"] for e in episodes]
 
-    print(f"=== Evaluation Results ({n} episodes) ===")
+    print(f"=== Evaluation Results — {split_name.upper()} split ({n} episodes) ===")
     print(f"  Avg reward:  {np.mean(rewards):.3f} +/- {np.std(rewards):.3f}")
     print(f"  Avg length:  {np.mean(lengths):.1f} +/- {np.std(lengths):.1f}")
     print()

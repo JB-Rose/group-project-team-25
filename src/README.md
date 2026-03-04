@@ -188,9 +188,11 @@ Three behavior profiles that produce progressively harder-to-detect bot data:
 
 | Profile | Mouse Movement | Typing | Scrolling | Detection Difficulty |
 |---------|---------------|--------|-----------|---------------------|
-| `linear` | Straight-line, instant jumps | Uniform 20 ms intervals | None | Easy |
-| `scripted` | Bezier curves with micro-jitter | Variable timing, burst typing, thinking pauses | Momentum-based random scrolls | Medium |
+| `linear` | Straight-line + idle fidgeting | Uniform 20 ms intervals | None | Easy |
+| `scripted` | Bezier curves + idle fidgeting | Variable timing, burst typing, thinking pauses | Momentum-based random scrolls | Medium |
 | `replay` | Replays recorded human mouse data + Gaussian noise | Uniform-ish | Replayed from source with variance | Hard |
+
+All bot types include **idle fidgeting** between actions -- small drifts, jitter, and micro-movements that prevent zero mouse variance during idle periods.
 
 #### Commands
 
@@ -211,7 +213,7 @@ python bots/selenium_bot.py --runs 3 --type replay \
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--runs` | `3` | Number of bot sessions to run |
-| `--type` | `linear` | Bot behavior profile: `linear`, `scripted`, or `replay` |
+| `--type` | `scripted` | Bot behavior profile: `linear`, `scripted`, or `replay` |
 | `--replay-source` | — | Path to a human telemetry JSON file (required for `replay` type) |
 | `--pause-between` | `2.0` | Seconds to wait between runs |
 
@@ -367,22 +369,41 @@ Training data lives in `data/human/` (label=1) and `data/bot/` (label=0).
 ### 2. Train
 
 ```bash
-python -m rl_captcha.scripts.train_ppo \
+python -u -m rl_captcha.scripts.train_ppo \
     --data-dir data/ \
-    --total-timesteps 500000
+    --save-path rl_captcha/agent/checkpoints/ppo_run1 \
+    --total-timesteps 500000 \
+    --val-episodes 100 \
+    2>&1 | Tee-Object -FilePath training.log
 ```
 
-Checkpoint saved to `rl_captcha/agent/checkpoints/ppo_run1/`.
+Checkpoint saved to `rl_captcha/agent/checkpoints/ppo_run1/`. Data is split 70/15/15 (train/val/test) with stratified sampling. Bot sessions are stochastically augmented during training (see [Data Augmentation](#data-augmentation)).
 
 ### 3. Evaluate
 
 ```bash
 python -m rl_captcha.scripts.evaluate_ppo \
     --agent rl_captcha/agent/checkpoints/ppo_run1 \
-    --data-dir data/
+    --data-dir data/ \
+    --episodes 500 \
+    --split test
 ```
 
-Outputs confusion matrix, F1 score, and action distribution breakdown.
+Outputs confusion matrix, accuracy, precision, recall, F1 score, outcome distribution, and action distribution.
+
+### 4. Visualize
+
+```bash
+# Plot training curves
+python -m rl_captcha.scripts.plot_training --log training.log --out figures/
+
+# Plot evaluation results
+python -m rl_captcha.scripts.evaluate_ppo --agent ... --data-dir data/ 2>&1 | Tee-Object -FilePath eval.log
+python -m rl_captcha.scripts.plot_eval --log eval.log --out figures/
+
+# Plot online learning log
+python -m rl_captcha.scripts.plot_online --log online_training.log --out figures/
+```
 
 #### Training CLI Flags
 
@@ -390,10 +411,12 @@ Outputs confusion matrix, F1 score, and action distribution breakdown.
 |------|---------|-------------|
 | `--data-dir` | `data/` | Root directory containing `human/` and `bot/` subdirectories |
 | `--save-path` | `rl_captcha/agent/checkpoints/ppo_run1` | Where to save model checkpoints |
-| `--total-timesteps` | `500000` | Total environment steps to train for |
+| `--total-timesteps` | `500000` (from PPOConfig) | Total environment steps to train for |
 | `--log-interval` | `1` | Print stats every N rollouts |
-| `--save-interval` | `10` | Save checkpoint every N rollouts |
+| `--save-interval` | `10` | Save checkpoint + run validation every N rollouts |
+| `--val-episodes` | `100` | Number of validation episodes per checkpoint |
 | `--device` | `auto` | Compute device: `auto`, `cuda`, or `cpu` |
+| `--split-seed` | `42` | Random seed for train/val/test split |
 
 #### Evaluation CLI Flags
 
@@ -402,7 +425,39 @@ Outputs confusion matrix, F1 score, and action distribution breakdown.
 | `--agent` | *(required)* | Path to checkpoint directory |
 | `--data-dir` | `data/` | Root data directory |
 | `--episodes` | `500` | Number of episodes to evaluate |
+| `--split` | `test` | Data split: `test`, `val`, `train`, or `all` |
+| `--split-seed` | `42` | Random seed for split (must match training) |
 | `--device` | `auto` | Compute device: `auto`, `cuda`, or `cpu` |
+
+#### Plot CLI Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--log` | `training.log` (plot_training) / *required* (plot_eval) | Path to log file |
+| `--out` | `figures` | Output directory for figures |
+| `--format` | `png` | Output format: `png`, `pdf`, or `svg` |
+
+---
+
+## Data Augmentation
+
+During training, **bot sessions** are stochastically augmented (50% probability per episode) to prevent the agent from relying on trivially separable features (e.g., zero mouse variance, perfectly regular timing). Human sessions are never augmented. Augmentation is disabled for the validation environment so val metrics reflect real data.
+
+| Augmentation | Default | Effect |
+|-------------|---------|--------|
+| Position noise | std=15px | Gaussian jitter on x/y coordinates |
+| Timing jitter | std=30ms | Gaussian noise on event timestamps |
+| Speed warp | 0.7x-1.4x | Random time stretch/compress across session |
+
+Configure in `rl_captcha/config.py` (`EventEnvConfig`):
+
+```python
+augment: bool = True              # enable/disable
+augment_prob: float = 0.5         # probability per bot episode
+aug_position_noise_std: float = 15.0
+aug_timing_jitter_std: float = 30.0
+aug_speed_warp_range: tuple = (0.7, 1.4)
+```
 
 ---
 

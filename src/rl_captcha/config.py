@@ -90,6 +90,13 @@ class EventEnvConfig:
     honeypot_trigger_rate_bot: float = 0.6
     honeypot_trigger_rate_human: float = 0.01
 
+    # Data augmentation (applied to BOT sessions only, per-episode during training)
+    augment: bool = True              # enable stochastic augmentation
+    augment_prob: float = 0.5         # probability of augmenting each bot episode
+    aug_position_noise_std: float = 15.0   # Gaussian noise on x/y coords (px)
+    aug_timing_jitter_std: float = 30.0    # Gaussian noise on timestamps (ms)
+    aug_speed_warp_range: tuple = (0.7, 1.4)  # random time stretch/compress
+
     # Normalization constants for event encoding
     max_coord_x: float = 1920.0
     max_coord_y: float = 1080.0

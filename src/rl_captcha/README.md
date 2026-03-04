@@ -31,7 +31,7 @@ Episodes have two distinct phases enforced by **action masking** (invalid action
 
 2. **Decision phase** (final window only): Only actions 2-6 are valid
    - The agent must make a terminal decision based on all accumulated evidence
-   - No more observing — must choose: puzzle, allow, or block
+   - No more observing -- must choose: puzzle, allow, or block
 
 This ensures the agent always processes the **entire session** before deciding, preventing shortcut strategies where it decides on window 1.
 
@@ -88,7 +88,7 @@ rl_captcha/
 │
 ├── environment/
 │   └── event_env.py             # Windowed Gymnasium env (26-dim obs, 7 actions)
-│                                # EventEncoder + action masking
+│                                # EventEncoder + action masking + bot data augmentation
 │
 ├── agent/
 │   ├── ppo_lstm.py              # PPO algorithm with LSTM recurrence + action masks
@@ -100,8 +100,9 @@ rl_captcha/
 └── scripts/
     ├── train_ppo.py             # Train PPO+LSTM agent
     ├── evaluate_ppo.py          # Evaluate (confusion matrix, F1, action distribution)
-    ├── plot_training.py         # Visualize training.log (7 figures)
-    └── plot_online.py           # Visualize online_training.log (5 figures)
+    ├── plot_training.py         # Visualize training.log
+    ├── plot_eval.py             # Visualize evaluation results
+    └── plot_online.py           # Visualize online_training.log
 ```
 
 ## Setup
@@ -114,17 +115,17 @@ Dependencies: PyTorch, Gymnasium, NumPy, scikit-learn, matplotlib.
 
 ## Data
 
-Training data lives in `data/human/` (label=1) and `data/bot/` (label=0). All events from a session are used (no truncation).
+Training data lives in `data/human/` (label=1) and `data/bot/` (label=0). All events from a session are used (no truncation). Data is split 70/15/15 (train/val/test) with stratified sampling.
 
 **Supported file formats:**
-- `session_*.json` — Live-confirm format from Dev Dashboard: `{ "sessionId": "...", "segments": [{ "mouse": [...], ... }] }`
-- `telemetry_*.json` — Chrome extension export: `{ "<sessionId>": { "segments": [...], "pageMeta": [...] } }`
+- `session_*.json` -- Live-confirm format from Dev Dashboard: `{ "sessionId": "...", "segments": [{ "mouse": [...], ... }] }`
+- `telemetry_*.json` -- Chrome extension export: `{ "<sessionId>": { "segments": [...], "pageMeta": [...] } }`
 
 **Important:** Only include data from the TicketMonarch site (localhost). Data from external sites will pollute the training distribution.
 
 ## Training
 
-All commands from the `src/TicketMonarch/` directory.
+All commands from the `src/` directory.
 
 ### 1. Collect Data
 
@@ -132,42 +133,108 @@ All commands from the `src/TicketMonarch/` directory.
 
 **Bot data:** Run bots against the live site:
 ```bash
-python bots/selenium_bot.py --runs 5 --type scripted
+python bots/selenium_bot.py --runs 10 --type scripted
 python bots/llm_bot.py --runs 3 --provider anthropic
 ```
-Export telemetry to `data/bot/`.
 
 ### 2. Train
 
 ```bash
 python -u -m rl_captcha.scripts.train_ppo \
-    --data-dir data/ --total-timesteps 500000 2>&1 | Tee-Object -FilePath training.log
+    --data-dir data/ \
+    --save-path rl_captcha/agent/checkpoints/ppo_run1 \
+    --total-timesteps 500000 \
+    --val-episodes 100 \
+    2>&1 | Tee-Object -FilePath training.log
 ```
 
 Saves checkpoint to `rl_captcha/agent/checkpoints/ppo_run1/`.
+
+#### Training CLI Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--data-dir` | `data/` | Root directory containing `human/` and `bot/` subdirectories |
+| `--save-path` | `rl_captcha/agent/checkpoints/ppo_run1` | Where to save model checkpoints |
+| `--total-timesteps` | `500000` (from PPOConfig) | Total environment steps to train for |
+| `--log-interval` | `1` | Print stats every N rollouts |
+| `--save-interval` | `10` | Save checkpoint + run validation every N rollouts |
+| `--val-episodes` | `100` | Number of validation episodes per checkpoint |
+| `--device` | `auto` | Compute device: `auto`, `cuda`, or `cpu` |
+| `--split-seed` | `42` | Random seed for train/val/test split |
 
 ### 3. Evaluate
 
 ```bash
 python -m rl_captcha.scripts.evaluate_ppo \
     --agent rl_captcha/agent/checkpoints/ppo_run1 \
-    --data-dir data/
+    --data-dir data/ \
+    --episodes 500 \
+    --split test
 ```
+
+Outputs confusion matrix, accuracy, precision, recall, F1 score, outcome distribution, and action distribution.
+
+#### Evaluation CLI Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--agent` | *(required)* | Path to checkpoint directory |
+| `--data-dir` | `data/` | Root data directory |
+| `--episodes` | `500` | Number of episodes to evaluate |
+| `--split` | `test` | Data split to evaluate on: `test`, `val`, `train`, or `all` |
+| `--split-seed` | `42` | Random seed for split (must match training) |
+| `--device` | `auto` | Compute device: `auto`, `cuda`, or `cpu` |
 
 ### 4. Visualize
 
 ```bash
+# Plot training curves from training.log
 python -m rl_captcha.scripts.plot_training --log training.log --out figures/
+
+# Plot evaluation results (pipe evaluate output to a file first)
+python -m rl_captcha.scripts.evaluate_ppo --agent ... --data-dir data/ 2>&1 | Tee-Object -FilePath eval.log
+python -m rl_captcha.scripts.plot_eval --log eval.log --out figures/
+
+# Plot online learning log
 python -m rl_captcha.scripts.plot_online --log online_training.log --out figures/
+```
+
+#### Plot CLI Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--log` | `training.log` (plot_training) / *required* (plot_eval) | Path to log file |
+| `--out` | `figures` | Output directory for figures |
+| `--format` | `png` | Output format: `png`, `pdf`, or `svg` |
+
+## Data Augmentation
+
+During training, **bot sessions** are stochastically augmented (50% probability per episode) to prevent the agent from relying on trivially separable features. Human sessions are never augmented. Augmentation is **disabled** for the validation environment so val metrics reflect real data.
+
+| Augmentation | Default | Effect |
+|-------------|---------|--------|
+| Position noise | std=15px | Gaussian jitter on x/y coordinates |
+| Timing jitter | std=30ms | Gaussian noise on event timestamps |
+| Speed warp | 0.7x-1.4x | Random time stretch/compress across session |
+
+Configure in `EventEnvConfig`:
+
+```python
+augment: bool = True              # enable/disable
+augment_prob: float = 0.5         # probability per bot episode
+aug_position_noise_std: float = 15.0
+aug_timing_jitter_std: float = 30.0
+aug_speed_warp_range: tuple = (0.7, 1.4)
 ```
 
 ## Live Integration
 
 The trained agent is loaded by `TicketMonarch/backend/agent_service.py` for real-time use:
 
-- **`evaluate_session()`** — Full evaluation with action masking: processes all windows through LSTM, applies observation mask on non-final windows and decision mask on the final window
-- **`rolling_evaluate()`** — Lightweight polling: returns bot probability from the final window's action distribution
-- **`online_learn()`** — PPO update after confirmed human/bot sessions (3 epochs, 60% learning rate) with proper action masking. Logs before/after comparison to `online_training.log`
+- **`evaluate_session()`** -- Full evaluation with action masking: processes all windows through LSTM, applies observation mask on non-final windows and decision mask on the final window
+- **`rolling_evaluate()`** -- Lightweight polling: returns bot probability from the final window's action distribution
+- **`online_learn()`** -- PPO update after confirmed human/bot sessions (3 epochs, 60% learning rate) with proper action masking. Logs before/after comparison to `online_training.log`
 
 All methods are thread-safe (wrapped with `threading.Lock`). Online and offline evaluation use identical action masking logic.
 
@@ -175,5 +242,5 @@ All methods are thread-safe (wrapped with `threading.Lock`). Online and offline 
 
 All hyperparameters in `config.py`:
 
-- **EventEnvConfig** — Window size (30 events), obs dim (26), min events (10), reward weights, puzzle pass rates, action masking, normalization constants
-- **PPOConfig** — Learning rate (3e-4), gamma (0.99), GAE lambda (0.95), clip ratio (0.2), entropy coefficient (0.01), LSTM (256 hidden, 2 layers)
+- **EventEnvConfig** -- Window size (30 events), obs dim (26), min events (10), reward weights, puzzle pass rates, action masking, normalization constants, data augmentation
+- **PPOConfig** -- Learning rate (3e-4), gamma (0.99), GAE lambda (0.95), clip ratio (0.2), entropy coefficient (0.01), LSTM (256 hidden, 2 layers)

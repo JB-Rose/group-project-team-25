@@ -380,3 +380,45 @@ def _parse_json(value: Any) -> list | dict:
         return parsed if isinstance(parsed, (list, dict)) else []
     except (json.JSONDecodeError, TypeError):
         return []
+
+
+# ---------------------------------------------------------------------------
+# Train / validation / test splitting
+# ---------------------------------------------------------------------------
+
+def split_sessions(
+    sessions: list[Session],
+    train: float = 0.70,
+    val: float = 0.15,
+    test: float = 0.15,
+    seed: int = 42,
+) -> tuple[list[Session], list[Session], list[Session]]:
+    """Stratified split of sessions into train / val / test sets.
+
+    Both human and bot sessions are split independently so each set
+    maintains the same label proportions as the full dataset.
+    """
+    import random as _rng
+
+    assert abs(train + val + test - 1.0) < 1e-6, "Ratios must sum to 1.0"
+
+    human = [s for s in sessions if s.label == 1]
+    bot = [s for s in sessions if s.label == 0]
+
+    def _split_group(group: list[Session]) -> tuple[list[Session], list[Session], list[Session]]:
+        rng = _rng.Random(seed)
+        shuffled = list(group)
+        rng.shuffle(shuffled)
+        n = len(shuffled)
+        n_train = int(n * train)
+        n_val = int(n * (train + val))
+        return shuffled[:n_train], shuffled[n_train:n_val], shuffled[n_val:]
+
+    h_train, h_val, h_test = _split_group(human)
+    b_train, b_val, b_test = _split_group(bot)
+
+    return (
+        h_train + b_train,
+        h_val + b_val,
+        h_test + b_test,
+    )

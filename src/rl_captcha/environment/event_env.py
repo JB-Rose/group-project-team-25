@@ -267,6 +267,64 @@ class EventEncoder:
         return vec
 
 
+def _augment_bot_timeline(events: list[dict], config: EventEnvConfig) -> list[dict]:
+    """Perturb a bot session's timeline to make it harder to distinguish from
+    human data.  Applied stochastically during training so the agent can't
+    rely on trivially separable features (zero variance, locked positions).
+
+    Perturbations:
+      1. Position noise — Gaussian jitter on x/y coordinates
+      2. Timing jitter  — Gaussian noise on timestamps
+      3. Speed warp     — random time stretch/compress to vary inter-event dt
+    """
+    if not events:
+        return events
+
+    rng = random.Random()
+
+    # --- 1. Speed warp: stretch/compress all timestamps ----------------
+    lo, hi = config.aug_speed_warp_range
+    warp_factor = rng.uniform(lo, hi)
+
+    # Anchor at the first timestamp so the session start doesn't drift
+    t0 = events[0].get("t", events[0].get("timestamp", 0)) or 0
+
+    augmented = []
+    for evt in events:
+        e = dict(evt)  # shallow copy
+
+        # Warp timestamp
+        t_key = "t" if "t" in e else "timestamp"
+        t_orig = e.get(t_key, 0) or 0
+        t_warped = t0 + (t_orig - t0) * warp_factor
+
+        # --- 2. Timing jitter ------------------------------------------
+        t_warped += rng.gauss(0, config.aug_timing_jitter_std)
+        e[t_key] = max(0, t_warped)
+
+        # --- 3. Position noise ------------------------------------------
+        if "x" in e and e["x"] is not None:
+            e["x"] = max(0, min(config.max_coord_x,
+                                e["x"] + rng.gauss(0, config.aug_position_noise_std)))
+        if "y" in e and e["y"] is not None:
+            e["y"] = max(0, min(config.max_coord_y,
+                                e["y"] + rng.gauss(0, config.aug_position_noise_std)))
+        if "pageX" in e and e["pageX"] is not None:
+            e["pageX"] = max(0, min(config.max_coord_x,
+                                    e["pageX"] + rng.gauss(0, config.aug_position_noise_std)))
+        if "pageY" in e and e["pageY"] is not None:
+            e["pageY"] = max(0, min(config.max_coord_y,
+                                    e["pageY"] + rng.gauss(0, config.aug_position_noise_std)))
+
+        augmented.append(e)
+
+    # Re-sort by time (jitter may have swapped a few neighbors)
+    t_key = "t" if "t" in augmented[0] else "timestamp"
+    augmented.sort(key=lambda e: e.get(t_key, 0))
+
+    return augmented
+
+
 class EventEnv(gym.Env):
     """Windowed CAPTCHA environment.
 
@@ -342,6 +400,12 @@ class EventEnv(gym.Env):
         self._honeypot_info_bonus_pending = 0.0
 
         timeline = self._encoder.build_timeline(session)
+
+        # Augment bot sessions stochastically during training
+        if (self.config.augment
+                and session.label == 0
+                and random.random() < self.config.augment_prob):
+            timeline = _augment_bot_timeline(timeline, self.config)
 
         # Split timeline into overlapping windows
         ws = self.config.window_size

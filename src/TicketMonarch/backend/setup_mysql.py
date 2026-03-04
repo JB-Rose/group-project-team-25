@@ -96,12 +96,15 @@ def create_user_sessions_table():
     )
 
     # Index on session_start for fast ORDER BY DESC LIMIT queries
-    cursor.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_session_start
-        ON user_sessions (session_start DESC)
-        """
-    )
+    try:
+        cursor.execute(
+            """
+            CREATE INDEX idx_session_start
+            ON user_sessions (session_start DESC)
+            """
+        )
+    except Exception:
+        pass  # Index already exists
 
     conn.commit()
     cursor.close()

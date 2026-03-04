@@ -1,20 +1,16 @@
 # Bots
 
-Bot implementations for generating training data. Each bot drives a real Chrome browser with the telemetry Chrome extension loaded, so all mouse movements, clicks, keystrokes, and scrolls are captured automatically.
+Bot implementations for generating training data. Each bot drives a real Chrome browser against the live TicketMonarch site. The frontend's built-in `tracking.js` captures all telemetry automatically, and the bot auto-exports session data to `data/bot/` after each run.
 
 ## Prerequisites
 
-- TicketMonarch running locally (`python app.py` + `npm run dev`)
-- Chrome extension at `chrome-extension/` (loaded automatically by the bots)
+- TicketMonarch running locally (`python TicketMonarch/backend/app.py` + `cd TicketMonarch/frontend && npm run dev`)
+- Chrome installed on your machine
 
 ## Setup
 
 ```bash
-cd bots
-python -m venv venv
-venv\Scripts\activate          # Windows
-# source venv/bin/activate     # macOS/Linux
-pip install -r requirements.txt
+pip install -r bots/requirements.txt
 
 # For LLM bot only:
 pip install browser-use playwright langchain-anthropic
@@ -27,44 +23,49 @@ Three behavior profiles for generating diverse bot data:
 
 | Type | Mouse | Typing | Scrolls | Detection Difficulty |
 |------|-------|--------|---------|---------------------|
-| `linear` | Straight-line, instant | Uniform 20ms intervals | None | Easy |
-| `scripted` | Bezier curves, slight jitter | Varied timing | Random scrolls | Medium |
+| `linear` | Straight-line + idle fidgeting | Uniform 20ms intervals | None | Easy |
+| `scripted` | Bezier curves + idle fidgeting | Varied timing, burst typing | Human-like momentum scrolls | Medium |
 | `replay` | Replays recorded human mouse data + noise | Uniform-ish | Replayed from source | Hard |
+
+All bot types include **idle fidgeting** between actions -- small drifts, jitter, and micro-movements that simulate a human hand resting on the mouse. This prevents the telemetry from having zero mouse variance during idle periods (a trivially detectable bot signal).
 
 ### Commands
 
 ```bash
-# Linear bot -- robotic straight-line movement, uniform typing
-python selenium_bot.py --runs 5 --type linear
+# Scripted bot (default) -- Bezier curves, varied timing, scrolling, fidgeting
+python bots/selenium_bot.py --runs 10 --type scripted
 
-# Scripted bot -- Bezier curves, varied timing, scrolling
-python selenium_bot.py --runs 5 --type scripted
+# Linear bot -- robotic straight-line movement, uniform typing
+python bots/selenium_bot.py --runs 5 --type linear
 
 # Replay bot -- replays real human mouse patterns with noise
-python selenium_bot.py --runs 3 --type replay \
-    --replay-source ../data/human/telemetry_export_example.json
+python bots/selenium_bot.py --runs 3 --type replay \
+    --replay-source data/human/telemetry_export_example.json
 ```
 
 ### How It Works
 
-1. Opens Chrome with the telemetry extension loaded
-2. Prompts you to **click "Start Recording"** in the extension popup
-3. Runs the full booking flow: Home -> Seat Selection -> Checkout -> Purchase
-4. After all runs, prompts you to **click "Export JSON"** in the extension popup
-5. Save the exported file to `data/bot/`
+1. Opens Chrome (no extension needed -- `tracking.js` captures everything)
+2. Sets `tm_is_bot=1` in sessionStorage so the confirmation page won't auto-confirm as human
+3. Runs the full booking flow for each run: Home -> Seat Selection -> Checkout -> Purchase
+4. Handles challenge modals if they appear (slider, canvas text, timed click -- up to 3 retries)
+5. After each run, waits for telemetry flush, then:
+   - Pulls raw telemetry from `/api/session/raw/<sid>`
+   - Saves JSON to `data/bot/` with a UTC timestamp filename
+   - Confirms the session as a bot (`true_label=0`) via `/api/agent/confirm`, triggering an online RL update
 
 ### Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--runs` | 3 | Number of bot sessions to run |
-| `--type` | linear | Bot behavior: `linear`, `scripted`, or `replay` |
+| `--runs` | `3` | Number of bot sessions to run |
+| `--type` | `scripted` | Bot behavior: `linear`, `scripted`, or `replay` |
 | `--replay-source` | -- | Path to human telemetry JSON (required for `replay`) |
-| `--pause-between` | 2.0 | Seconds between runs |
+| `--pause-between` | `2.0` | Seconds between runs |
 
 ## LLM Bot
 
-Uses [browser-use](https://github.com/browser-use/browser-use) to give an LLM (Claude or GPT-4) autonomous control of Chrome. The LLM reads the page, decides where to click, what to type, and completes the booking flow on its own — producing the most realistic bot behavior.
+Uses [browser-use](https://github.com/browser-use/browser-use) to give an LLM (Claude or GPT-4) autonomous control of Chrome. The LLM reads the page, decides where to click, what to type, and completes the booking flow on its own -- producing the most realistic bot behavior.
 
 ### Setup
 
@@ -83,33 +84,27 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 ```bash
 # Run with Claude (default)
-python llm_bot.py --runs 3 --provider anthropic
+python bots/llm_bot.py --runs 3 --provider anthropic
 
 # Run with GPT-4o
-python llm_bot.py --runs 3 --provider openai
+python bots/llm_bot.py --runs 3 --provider openai
 
 # Custom task prompt
-python llm_bot.py --task "Go to localhost:3000, browse concerts, pick the cheapest tickets"
+python bots/llm_bot.py --task "Go to localhost:3000, browse concerts, pick the cheapest tickets"
 ```
 
 ### Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--runs` | 1 | Number of bot sessions |
-| `--provider` | anthropic | LLM provider: `anthropic` or `openai` |
-| `--pause-between` | 3.0 | Seconds between runs |
-| `--task` | (full booking flow) | Custom instruction prompt for the LLM |
+| `--runs` | `1` | Number of bot sessions |
+| `--provider` | `anthropic` | LLM provider: `anthropic` or `openai` |
+| `--pause-between` | `3.0` | Seconds between runs |
+| `--task` | *(full booking flow)* | Custom instruction prompt for the LLM |
 
 ### How It Works
 
-1. Opens Chrome with the telemetry extension (must be visible, not headless)
+1. Opens Chrome (visible, not headless)
 2. The LLM autonomously navigates: browses concerts, selects seats, fills checkout
-3. Chrome extension captures all telemetry in the background
-4. After runs complete, export from the extension popup and save to `data/bot/`
-
-## After Running Bots
-
-1. Click **"Export JSON"** in the Chrome extension popup
-2. Save the file to `data/bot/`
-3. The data is auto-labeled as bot (label=0) during training
+3. `tracking.js` captures all telemetry in the background
+4. After each run, auto-exports telemetry to `data/bot/` and confirms as bot

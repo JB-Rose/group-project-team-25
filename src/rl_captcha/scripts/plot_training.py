@@ -27,6 +27,7 @@ RE_LOSSES = re.compile(
     r"Policy loss:\s*([-\d.]+)\s*\|\s*Value loss:\s*([-\d.]+)\s*\|\s*Entropy:\s*([-\d.]+)"
 )
 RE_OUTCOMES = re.compile(r"Outcomes:\s*(.+)")
+RE_VAL_ACC = re.compile(r"\[Val accuracy:\s*([\d.]+)\s+over\s+(\d+)\s+episodes\]")
 
 
 def parse_log(path: str) -> list[dict]:
@@ -86,6 +87,12 @@ def parse_log(path: str) -> list[dict]:
                         name, pct = part.rsplit(":", 1)
                         outcomes[name.strip()] = float(pct.strip().rstrip("%"))
                 current["outcomes"] = outcomes
+                continue
+
+            m = RE_VAL_ACC.search(line)
+            if m and current:
+                current["val_accuracy"] = float(m.group(1))
+                current["val_episodes"] = int(m.group(2))
                 continue
 
     if current:
@@ -270,7 +277,7 @@ def plot_all(rollouts: list[dict], out_dir: Path, fmt: str = "png"):
         plt.close(fig)
         print(f"  Saved outcome_distribution.{fmt}")
 
-    # ── 6. Classification accuracy (correct episodes / total episodes) ─
+    # ── 6. Classification accuracy: train vs validation ─────────────
     correct_pcts = []
     for r in rollouts:
         oc = r.get("outcomes", {})
@@ -279,12 +286,24 @@ def plot_all(rollouts: list[dict], out_dir: Path, fmt: str = "png"):
         correct_pcts.append(correct)
 
     correct_arr = np.array(correct_pcts)
+
+    # Extract validation accuracy points (only logged every save_interval)
+    val_steps_k = []
+    val_accs = []
+    for r in rollouts:
+        if "val_accuracy" in r:
+            val_steps_k.append(r["steps"] / 1000)
+            val_accs.append(r["val_accuracy"] * 100)
+
     fig, ax = plt.subplots(figsize=(7, 4))
     ax.plot(steps_k, correct_arr, alpha=0.2, color="#27ae60", linewidth=0.8)
-    ax.plot(steps_k, smooth(correct_arr, 10), color="#27ae60", linewidth=2, label="Smoothed (w=10)")
+    ax.plot(steps_k, smooth(correct_arr, 10), color="#27ae60", linewidth=2, label="Train (smoothed)")
+    if val_steps_k:
+        ax.plot(val_steps_k, val_accs, "o-", color="#e74c3c", linewidth=1.8,
+                markersize=4, label="Validation")
     ax.set_xlabel("Training Steps (×1K)")
     ax.set_ylabel("Correct Decisions (%)")
-    ax.set_title("Classification Accuracy Over Training")
+    ax.set_title("Train vs Validation Accuracy")
     ax.set_ylim(0, 105)
     ax.yaxis.set_major_formatter(ticker.PercentFormatter())
     ax.legend()
@@ -329,14 +348,18 @@ def plot_all(rollouts: list[dict], out_dir: Path, fmt: str = "png"):
     ax.set_title("(c) Policy Entropy")
     ax.grid(True, alpha=0.3)
 
-    # accuracy
+    # accuracy (train vs val)
     ax = axes[1, 1]
-    ax.plot(steps_k, smooth(correct_arr, 10), color="#27ae60", linewidth=2)
+    ax.plot(steps_k, smooth(correct_arr, 10), color="#27ae60", linewidth=2, label="Train")
+    if val_steps_k:
+        ax.plot(val_steps_k, val_accs, "o-", color="#e74c3c", linewidth=1.8,
+                markersize=3, label="Validation")
     ax.set_xlabel("Steps (×1K)")
     ax.set_ylabel("Correct (%)")
-    ax.set_title("(d) Classification Accuracy")
+    ax.set_title("(d) Train vs Validation Accuracy")
     ax.set_ylim(0, 105)
     ax.yaxis.set_major_formatter(ticker.PercentFormatter())
+    ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
 
     fig.tight_layout(rect=[0, 0, 1, 0.95])

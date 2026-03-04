@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 
 from rl_captcha.config import Config
-from rl_captcha.data.loader import load_from_directory
+from rl_captcha.data.loader import load_from_directory, split_sessions
 from rl_captcha.environment.event_env import EventEnv
 from rl_captcha.agent.ppo_lstm import PPOLSTM
 
@@ -35,8 +35,18 @@ def parse_args() -> argparse.Namespace:
                     help="Print stats every N rollouts")
     p.add_argument("--save-interval", type=int, default=10,
                     help="Save checkpoint every N rollouts")
+    p.add_argument("--val-episodes", type=int, default=100,
+                    help="Number of validation episodes per checkpoint")
     p.add_argument("--device", type=str, default="auto")
+    p.add_argument("--split-seed", type=int, default=42,
+                    help="Random seed for train/val/test split")
     return p.parse_args()
+
+
+def _label_counts(sessions):
+    h = sum(1 for s in sessions if s.label == 1)
+    b = sum(1 for s in sessions if s.label == 0)
+    return h, b
 
 
 def main():
@@ -49,16 +59,33 @@ def main():
     # Load data
     print(f"Loading sessions from {args.data_dir}...")
     sessions = load_from_directory(args.data_dir)
-    human_count = sum(1 for s in sessions if s.label == 1)
-    bot_count = sum(1 for s in sessions if s.label == 0)
+    human_count, bot_count = _label_counts(sessions)
     print(f"  Loaded {len(sessions)} sessions ({human_count} human, {bot_count} bot)")
 
     if not sessions:
         print("ERROR: No sessions found. Place JSON files in data/human/ and data/bot/.")
         return
 
-    # Create environment and agent
-    env = EventEnv(sessions, config=cfg.event_env)
+    # Stratified 70/15/15 split
+    train_sessions, val_sessions, test_sessions = split_sessions(
+        sessions, train=0.70, val=0.15, test=0.15, seed=args.split_seed,
+    )
+    h_tr, b_tr = _label_counts(train_sessions)
+    h_va, b_va = _label_counts(val_sessions)
+    h_te, b_te = _label_counts(test_sessions)
+    print(f"  Train: {len(train_sessions)} ({h_tr} human, {b_tr} bot)")
+    print(f"  Val:   {len(val_sessions)} ({h_va} human, {b_va} bot)")
+    print(f"  Test:  {len(test_sessions)} ({h_te} human, {b_te} bot)  [held out]")
+
+    # Create environments (augmentation on for training, off for validation)
+    train_env = EventEnv(train_sessions, config=cfg.event_env)
+    if val_sessions:
+        from dataclasses import replace
+        val_cfg = replace(cfg.event_env, augment=False)
+        val_env = EventEnv(val_sessions, config=val_cfg)
+    else:
+        val_env = None
+
     agent = PPOLSTM(
         obs_dim=cfg.event_env.event_dim,
         action_dim=7,
@@ -80,7 +107,7 @@ def main():
 
         # Collect rollout
         agent.buffer.reset()
-        rollout_stats = _collect_rollout(env, agent, cfg.ppo.rollout_steps)
+        rollout_stats = _collect_rollout(train_env, agent, cfg.ppo.rollout_steps)
         total_steps += agent.buffer.ptr
 
         # Compute GAE (bootstrap with value of last observation)
@@ -103,14 +130,55 @@ def main():
                 rollout_stats, update_metrics, t_elapsed,
             )
 
-        # Save checkpoint
+        # Save checkpoint + validation
         if rollout_num % args.save_interval == 0:
             agent.save(args.save_path)
             print(f"  [Checkpoint saved to {args.save_path}]")
 
+            if val_env and args.val_episodes > 0:
+                val_acc = _quick_validate(val_env, agent, args.val_episodes)
+                print(f"  [Val accuracy: {val_acc:.3f} over {args.val_episodes} episodes]")
+            print()
+
     # Final save
     agent.save(args.save_path)
     print(f"\nTraining complete. Final checkpoint saved to {args.save_path}")
+
+    # Final validation
+    if val_env and args.val_episodes > 0:
+        val_acc = _quick_validate(val_env, agent, args.val_episodes)
+        print(f"Final val accuracy: {val_acc:.3f}")
+
+
+def _quick_validate(env: EventEnv, agent: PPOLSTM, num_episodes: int) -> float:
+    """Run deterministic episodes on the validation set and return accuracy."""
+    correct = 0
+    total = 0
+
+    for _ in range(num_episodes):
+        obs, info = env.reset()
+        agent.reset_hidden()
+
+        while info.get("too_short"):
+            obs, info = env.reset()
+            agent.reset_hidden()
+
+        true_label = info["true_label"]
+        action_mask = info.get("action_mask")
+        done = False
+
+        while not done:
+            action, _, _ = agent.select_action(obs, action_mask=action_mask, deterministic=True)
+            obs, reward, terminated, truncated, step_info = env.step(action)
+            done = terminated or truncated
+            action_mask = step_info.get("action_mask")
+
+        outcome = step_info.get("outcome", "")
+        if outcome in ("correct_block", "bot_blocked_puzzle", "correct_allow"):
+            correct += 1
+        total += 1
+
+    return correct / total if total > 0 else 0.0
 
 
 def _collect_rollout(

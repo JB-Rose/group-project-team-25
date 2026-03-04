@@ -133,11 +133,16 @@ def _type_human(element, text):
 
 
 def _type_uniform(element, text):
-    """Perfectly uniform typing — obviously robotic."""
+    """Uniform typing with slight per-run variance — still robotic but not identical."""
     element.clear()
+    base_delay = random.uniform(0.015, 0.035)
     for char in text:
         element.send_keys(char)
-        time.sleep(0.02)
+        delay = max(0.005, base_delay + random.gauss(0, 0.005))
+        time.sleep(delay)
+        # Occasional micro-pause (e.g. switching mental focus)
+        if random.random() < 0.05:
+            time.sleep(random.uniform(0.05, 0.15))
 
 
 # ---------------------------------------------------------------------------
@@ -206,9 +211,94 @@ def _human_move_and_click(driver, element, click_only=False):
 
 
 def _linear_move_and_click(driver, element, click_only=False):
-    """Straight-line move + click. Obviously robotic."""
+    """Straight-line move + click with slight timing variance."""
+    # Occasional pre-click hover
+    if random.random() < 0.10:
+        ActionChains(driver).move_to_element(element).perform()
+        time.sleep(random.uniform(0.1, 0.3))
     ActionChains(driver).move_to_element(element).click().perform()
-    time.sleep(0.1)
+    time.sleep(random.uniform(0.05, 0.2))
+
+
+def _idle_fidget(driver, duration: float = None):
+    """Simulate idle mouse fidgeting — small drifts and micro-movements that
+    humans naturally make while reading, thinking, or waiting.
+
+    This is the KEY missing behavior that makes bot telemetry trivially
+    detectable: real humans never hold the mouse perfectly still.
+    """
+    if duration is None:
+        duration = random.uniform(0.8, 3.0)
+
+    elapsed = 0.0
+    while elapsed < duration:
+        # Pick a fidget behavior
+        behavior = random.choices(
+            ["drift", "jitter", "circle", "pause"],
+            weights=[0.35, 0.30, 0.15, 0.20],
+        )[0]
+
+        if behavior == "drift":
+            # Slow drift in a random direction (reading, scanning)
+            steps = random.randint(5, 15)
+            dx_bias = random.gauss(0, 20)
+            dy_bias = random.gauss(0, 12)
+            actions = ActionChains(driver)
+            for _ in range(steps):
+                dx = int(dx_bias / steps + random.gauss(0, 2))
+                dy = int(dy_bias / steps + random.gauss(0, 1.5))
+                if dx != 0 or dy != 0:
+                    actions.move_by_offset(dx, dy)
+                pause = random.uniform(0.03, 0.12)
+                actions.pause(pause)
+                elapsed += pause
+            try:
+                actions.perform()
+            except Exception:
+                pass
+
+        elif behavior == "jitter":
+            # Tiny tremor-like movements (hand not perfectly steady)
+            actions = ActionChains(driver)
+            jitter_count = random.randint(3, 8)
+            for _ in range(jitter_count):
+                dx = random.randint(-3, 3)
+                dy = random.randint(-2, 2)
+                if dx != 0 or dy != 0:
+                    actions.move_by_offset(dx, dy)
+                pause = random.uniform(0.02, 0.08)
+                actions.pause(pause)
+                elapsed += pause
+            try:
+                actions.perform()
+            except Exception:
+                pass
+
+        elif behavior == "circle":
+            # Small circular/arc movement (hovering indecisively)
+            actions = ActionChains(driver)
+            radius = random.uniform(8, 30)
+            arc_steps = random.randint(6, 12)
+            start_angle = random.uniform(0, 2 * math.pi)
+            for i in range(arc_steps):
+                angle = start_angle + (i / arc_steps) * math.pi * random.uniform(0.5, 1.5)
+                dx = int(radius * math.cos(angle) / arc_steps * 2)
+                dy = int(radius * math.sin(angle) / arc_steps * 2)
+                if dx != 0 or dy != 0:
+                    actions.move_by_offset(dx, dy)
+                pause = random.uniform(0.03, 0.10)
+                actions.pause(pause)
+                elapsed += pause
+            try:
+                actions.perform()
+            except Exception:
+                pass
+
+        else:  # pause
+            # Brief stillness (but not too long — humans fidget again quickly)
+            pause = random.uniform(0.2, 0.8)
+            time.sleep(pause)
+            elapsed += pause
 
 
 def _random_scroll(driver, scrolls: int = 2):
@@ -476,7 +566,11 @@ def _fill_checkout(driver, type_fn, move_fn):
                 move_fn(driver, inp, click_only=True)
                 type_fn(inp, value)
 
-            time.sleep(random.uniform(0.2, 0.6))
+            # Idle fidget between fields (human reads next label, glances at card)
+            if random.random() < 0.4:
+                _idle_fidget(driver, random.uniform(0.3, 1.0))
+            else:
+                time.sleep(random.uniform(0.2, 0.6))
         except Exception as e:
             print(f"  WARNING: Could not fill field: {e}")
 
@@ -510,17 +604,17 @@ def _fill_checkout(driver, type_fn, move_fn):
 # ---------------------------------------------------------------------------
 
 def linear_bot(driver):
-    """Straight-line mouse, instant clicks, uniform typing. Very bot-like."""
+    """Straight-line mouse, uniform typing with slight variance."""
     _go_home(driver)
-    time.sleep(0.3)
+    _idle_fidget(driver, random.uniform(0.5, 1.5))
 
     if not _pick_concert(driver, _linear_move_and_click):
         return
-    time.sleep(0.2)
+    _idle_fidget(driver, random.uniform(0.3, 1.0))
 
     if not _pick_section(driver, _linear_move_and_click):
         return
-    time.sleep(0.2)
+    _idle_fidget(driver, random.uniform(0.3, 0.8))
 
     _fill_checkout(driver, _type_uniform, _linear_move_and_click)
 
@@ -528,21 +622,23 @@ def linear_bot(driver):
 def scripted_bot(driver):
     """Bezier curve mouse, human-like typing, scrolling. More sophisticated."""
     _go_home(driver)
-    time.sleep(random.uniform(0.8, 2.0))
+    _idle_fidget(driver, random.uniform(1.0, 3.0))
 
     # Browse around first
     _human_scroll(driver, scrolls=random.randint(1, 3))
+    _idle_fidget(driver, random.uniform(0.5, 1.5))
 
     if not _pick_concert(driver, _human_move_and_click):
         return
-    time.sleep(random.uniform(0.5, 1.2))
+    _idle_fidget(driver, random.uniform(0.8, 2.0))
 
     # Look at seats
     _human_scroll(driver, scrolls=random.randint(1, 2))
+    _idle_fidget(driver, random.uniform(0.5, 1.0))
 
     if not _pick_section(driver, _human_move_and_click):
         return
-    time.sleep(random.uniform(0.3, 0.8))
+    _idle_fidget(driver, random.uniform(0.5, 1.5))
 
     _fill_checkout(driver, _type_human, _human_move_and_click)
 
