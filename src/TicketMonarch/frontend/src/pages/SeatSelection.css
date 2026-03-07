@@ -47,19 +47,17 @@
 }
 
 .ss-back-btn {
-  background: none;
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
-  padding: 8px 14px;
-  font-size: 14px;
-  font-weight: 500;
-  color: #374151;
-  cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
+  background: transparent;
+    border: none;
+    cursor: pointer;
+    font-size: 16px;
+    color: #1a1a1a;
+    padding: 8px 12px;
+    border-radius: 4px;
+    transition: background-color 0.2s;
 }
 .ss-back-btn:hover {
-  background: #f3f4f6;
-  border-color: #9ca3af;
+  background: #f0f0f0;
 }
 
 /* ── Event info bar ── */

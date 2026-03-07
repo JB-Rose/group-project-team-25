@@ -1,3 +1,4 @@
+/* Home.css */
 .home-container {
   min-height: 100vh;
   background-color: #f5f5f5;
@@ -14,8 +15,8 @@
   margin: 0 auto;
   padding: 0 20px;
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  gap: 14px;
 }
 
 .logo {
@@ -25,6 +26,7 @@
   font-size: 24px;
   font-weight: 600;
   color: #1a1a1a;
+  flex-shrink: 0;
 }
 
 .logo-icon {
@@ -68,7 +70,9 @@
   border: 1px solid #e0e0e0;
   border-radius: 24px;
   padding: 12px 20px;
-  width: 100%;
+  flex: 1;
+  width: auto;
+  min-width: 320px;
 }
 
 .search-icon {
@@ -88,6 +92,87 @@
 
 .search-input::placeholder {
   color: #999;
+}
+
+.home-toolbar {
+  max-width: 1200px;
+  margin: 10px auto 0;
+  padding: 0 20px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.home-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+}
+
+.search-bar {
+  flex: 1;
+  width: auto;
+  max-width: none;
+  min-width: 260px;
+}
+
+.sort-select {
+  border: 1px solid #e0e0e0;
+  background: #fff;
+  border-radius: 10px;
+  padding: 6px 6px;
+  font-size: 14px;
+  color: #1a1a1a;
+  outline: none;
+}
+
+.sort-wrap {
+  flex-shrink: 0;
+}
+
+.info-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.info-btn {
+  border: none;
+  background: transparent;
+  padding: 0 2px;
+  cursor: default;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.info-btn:hover {
+  opacity: 1;
+}
+
+.info-tooltip {
+  position: absolute;
+  left: calc(100% + 8px);
+  top: 50%;
+  transform: translateY(-50%);
+  background: #111;
+  color: #fff;
+  font-size: 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  white-space: nowrap;
+  z-index: 50;
+}
+
+.info-tooltip::before {
+  content: "";
+  position: absolute;
+  left: -6px;
+  top: 50%;
+  transform: translateY(-50%);
+  border-width: 6px;
+  border-style: solid;
+  border-color: transparent;
 }
 
 .home-main {
@@ -150,7 +235,7 @@
   color: #666;
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
 }
 
 .info-icon {
@@ -218,6 +303,11 @@
 
   .search-bar {
     width: 100%;
+    min-width: 0;
+  }
+
+  .home-toolbar {
+    justify-content: flex-start;
   }
 
   .site-disclaimer {
@@ -226,5 +316,4 @@
     font-size: 14px;
     color: #777;
   }
-
 }

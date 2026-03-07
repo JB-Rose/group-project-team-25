@@ -119,7 +119,7 @@ function SeatSelection() {
             <span className="logo-text">Ticket Monarch</span>
           </div>
           <button className="ss-back-btn" onClick={() => navigate('/')}>
-            ← Back to Events
+            ← Back
           </button>
         </div>
         <div className="header-separator" />
