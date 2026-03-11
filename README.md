@@ -1,4 +1,4 @@
-# Project Title
+# RL-Based Strategies for Improving and Attacking Synthetic CAPTCHAs
 
 > A mock concert ticket-booking web app that uses a PPO+LSTM reinforcement learning agent to detect bots in real time based on raw telemetry (mouse movements, clicks, keystrokes, scrolls).
 
@@ -69,7 +69,7 @@
 
 ### Installation
 
-## 1. Create and activate a virtual environment
+### 1. Create and activate a virtual environment
 
 **PowerShell (Windows):**
 ```powershell
@@ -83,7 +83,7 @@ python -m venv venv
 source venv/bin/activate
 ```
 
-## 2. Install all Python dependencies
+### 2. Install all Python dependencies
 
 ```bash
 pip install -r TicketMonarch/backend/requirements.txt
@@ -97,7 +97,7 @@ pip install langchain-anthropic
 playwright install chromium
 ```
 
-## 3. Configure the database
+### 3. Configure the database
 
 ```bash
 cp TicketMonarch/.env.example TicketMonarch/.env
@@ -117,7 +117,7 @@ Then create the database and tables:
 python TicketMonarch/backend/setup_mysql.py
 ```
 
-## 4. Install frontend dependencies
+### 4. Install frontend dependencies
 
 ```bash
 cd TicketMonarch/frontend
