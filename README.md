@@ -109,6 +109,27 @@ npm run dev
 
 ---
 
+## Usage
+Open **http://localhost:3000** in your browser. Vite proxies `/api/*` requests to Flask automatically.
+
+1. **Home** (`/`) — Browse concerts and select one
+2. **Seat Selection** (`/seats/:id`) — Pick seats from an interactive layout
+3. **Checkout** (`/checkout`) — Fill the payment form
+   - Rolling inference polls every 3 seconds; deploys a honeypot if suspicious
+   - On "Purchase": telemetry is force-flushed and the agent evaluates the full session
+   - Honeypot triggered → instant hard puzzle
+   - High bot probability → scaled puzzle (easy/medium/hard based on confidence)
+   - Low suspicion → checkout proceeds
+4. **Confirmation** (`/confirmation`) — Order confirmed, session sent for online RL update
+
+## Dev Dashboard
+
+Open **http://localhost:3000/dev** in a separate tab.
+
+- **Live Monitor:** Auto-detects the active session, polls every 1 second showing real-time event counts and rolling bot probability.
+- **Analyze Session:** Full agent analysis on any session — decision banner, action probability bars, per-event timeline, LSTM hidden-state heatmap.
+---
+
 ## API Reference
 
 <details>
