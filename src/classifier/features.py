@@ -35,7 +35,7 @@ from classifier.data_loader import Session
 
 
 FEATURE_NAMES = [
-    # Mouse (8)
+    # Mouse (9)
     "mouse_count",
     "mouse_avg_speed",
     "mouse_std_speed",
@@ -44,26 +44,31 @@ FEATURE_NAMES = [
     "mouse_direction_change_ratio",
     "mouse_straightness",
     "mouse_jitter_ratio",
+    "mouse_acceleration_std",
     # Click (4)
     "click_count",
     "click_avg_interval",
     "click_std_interval",
     "click_interactive_ratio",
-    # Keystroke (5)
+    # Keystroke (6)
     "keystroke_count",
     "keystroke_avg_interval",
     "keystroke_std_interval",
     "keystroke_unique_fields",
     "keystroke_field_switch_ratio",
-    # Scroll (5)
+    "keystroke_rhythm_regularity",
+    # Scroll (6)
     "scroll_count",
     "scroll_avg_dy",
     "scroll_std_dy",
     "scroll_total_abs",
     "scroll_avg_speed",
+    "scroll_direction_change_ratio",
+    # Session-level (1)
+    "session_duration",
 ]
 
-FEATURE_DIM = len(FEATURE_NAMES)  # 22
+FEATURE_DIM = len(FEATURE_NAMES)  # 26
 
 INTERACTIVE_TAGS = {"INPUT", "BUTTON", "A", "SELECT", "TEXTAREA"}
 
@@ -86,13 +91,14 @@ class SessionFeatureExtractor:
     # ------------------------------------------------------------------
 
     def extract(self, session: Session) -> np.ndarray:
-        """Return a (22,) float32 feature vector for one session."""
+        """Return a (26,) float32 feature vector for one session."""
         vec = np.zeros(FEATURE_DIM, dtype=np.float32)
 
-        vec[0:8]   = self._mouse_features(session.mouse)
-        vec[8:12]  = self._click_features(session.clicks)
-        vec[12:17] = self._keystroke_features(session.keystrokes)
-        vec[17:22] = self._scroll_features(session.scroll)
+        vec[0:9]   = self._mouse_features(session.mouse)
+        vec[9:13]  = self._click_features(session.clicks)
+        vec[13:19] = self._keystroke_features(session.keystrokes)
+        vec[19:25] = self._scroll_features(session.scroll)
+        vec[25]    = self._session_duration(session)
 
         # Replace any NaN/Inf that slipped through with 0
         np.nan_to_num(vec, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
@@ -112,7 +118,7 @@ class SessionFeatureExtractor:
         cfg = self.config
         count = len(events)
         if count == 0:
-            return [0.0] * 8
+            return [0.0] * 9
 
         speeds, dts = [], []
         dir_changes = 0
@@ -178,6 +184,15 @@ class SessionFeatureExtractor:
         else:
             straightness = 0.0
 
+        # Acceleration std: variability in speed changes between consecutive
+        # steps. Humans naturally accelerate/decelerate; bots move at constant
+        # speed or with mechanical regularity.
+        if len(speeds) >= 2:
+            accels = [speeds[i] - speeds[i - 1] for i in range(1, len(speeds))]
+            accel_std = float(np.std(accels))
+        else:
+            accel_std = 0.0
+
         return [
             float(count),
             avg_speed,
@@ -187,6 +202,7 @@ class SessionFeatureExtractor:
             dir_change_ratio,
             straightness,
             jitter_ratio,
+            accel_std,
         ]
 
     # ------------------------------------------------------------------
@@ -240,7 +256,7 @@ class SessionFeatureExtractor:
         downs = [e for e in events if e.get("type") == "down"]
         count = len(downs)
         if count == 0:
-            return [0.0] * 5
+            return [0.0] * 6
 
         intervals = []
         fields_seen = []
@@ -274,12 +290,21 @@ class SessionFeatureExtractor:
         unique_fields = float(len(fields_seen))
         field_switch_ratio = field_switches / max(count - 1, 1)
 
+        # Rhythm regularity: coefficient of variation (std / mean) of
+        # inter-keystroke intervals. Bots type with suspiciously uniform
+        # timing (low CV); humans have natural variability (higher CV).
+        if avg_interval > 0 and len(intervals) >= 2:
+            rhythm_regularity = std_interval / avg_interval
+        else:
+            rhythm_regularity = 0.0
+
         return [
             float(count),
             avg_interval,
             std_interval,
             unique_fields,
             field_switch_ratio,
+            rhythm_regularity,
         ]
 
     # ------------------------------------------------------------------
@@ -291,17 +316,20 @@ class SessionFeatureExtractor:
     def _scroll_features(self, events: list[dict]) -> list[float]:
         count = len(events)
         if count == 0:
-            return [0.0] * 5
+            return [0.0] * 6
 
         abs_dys, speeds = [], []
+        raw_dys = []
         prev_t = None
         prev_scroll_y = None
 
         for evt in events:
             t  = float(evt.get("t", 0) or 0)
-            dy = abs(float(evt.get("dy", 0) or 0))
+            raw_dy = float(evt.get("dy", 0) or 0)
+            dy = abs(raw_dy)
             sy = float(evt.get("scrollY", 0) or 0)
             abs_dys.append(dy)
+            raw_dys.append(raw_dy)
 
             dt = evt.get("dt_since_last")
             if dt is not None and isinstance(dt, (int, float)) and dt > 0:
@@ -323,4 +351,43 @@ class SessionFeatureExtractor:
         total_abs    = float(np.sum(abs_dys))
         avg_speed    = float(np.mean(speeds))  if speeds  else 0.0
 
-        return [float(count), avg_dy, std_dy, total_abs, avg_speed]
+        # Scroll direction change ratio: fraction of consecutive scroll
+        # pairs where dy sign flips. Humans scroll up and down erratically;
+        # bots tend to scroll in one direction.
+        dir_changes = 0
+        for i in range(1, len(raw_dys)):
+            if raw_dys[i] != 0 and raw_dys[i - 1] != 0:
+                if (raw_dys[i] > 0) != (raw_dys[i - 1] > 0):
+                    dir_changes += 1
+        scroll_dir_change_ratio = dir_changes / max(count - 1, 1)
+
+        return [float(count), avg_dy, std_dy, total_abs, avg_speed, scroll_dir_change_ratio]
+
+    # ------------------------------------------------------------------
+    # Session-level features
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _session_duration(session: Session) -> float:
+        """Total time span (ms) across all event types in the session."""
+        all_times: list[float] = []
+        for evt in session.mouse:
+            t = evt.get("t")
+            if t is not None:
+                all_times.append(float(t))
+        for evt in session.clicks:
+            t = evt.get("t")
+            if t is not None:
+                all_times.append(float(t))
+        for evt in session.keystrokes:
+            t = evt.get("t")
+            if t is not None:
+                all_times.append(float(t))
+        for evt in session.scroll:
+            t = evt.get("t")
+            if t is not None:
+                all_times.append(float(t))
+
+        if len(all_times) < 2:
+            return 0.0
+        return max(all_times) - min(all_times)
