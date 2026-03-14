@@ -80,6 +80,9 @@ class HumanLikelihoodClassifier:
     ) -> "HumanLikelihoodClassifier":
         """Train the XGBoost classifier.
 
+        Applies label smoothing and feature noise augmentation from config
+        to improve generalization and produce calibrated probabilities.
+
         Parameters
         ----------
         X : array of shape (N, feature_dim)
@@ -94,20 +97,48 @@ class HumanLikelihoodClassifier:
             )
 
         cfg = self.config
+
+        # --- Feature noise augmentation ---
+        # Add Gaussian noise scaled to each feature's std to simulate
+        # data variation and prevent the model from memorizing exact values.
+        # This forces the model to learn broader decision boundaries.
+        X_train = X.copy().astype(np.float64)
+        if cfg.feature_noise_std > 0:
+            rng = np.random.RandomState(cfg.random_state)
+            feature_stds = np.std(X_train, axis=0)
+            noise = rng.normal(0, 1, size=X_train.shape) * feature_stds * cfg.feature_noise_std
+            X_train = X_train + noise
+
+        y_train = np.array(y, dtype=int)
+
+        # --- Label smoothing via sample weights ---
+        # Reduce sample weights so the model doesn't over-commit to any
+        # single training example, producing softer probability estimates.
+        alpha = cfg.label_smooth_alpha
+        sample_weights = np.full(len(y_train), 1.0 - alpha)
+
         self._model = xgb.XGBClassifier(
             n_estimators=cfg.n_estimators,
             max_depth=cfg.max_depth,
             learning_rate=cfg.learning_rate,
             subsample=cfg.subsample,
             colsample_bytree=cfg.colsample_bytree,
+            min_child_weight=cfg.min_child_weight,
+            reg_alpha=cfg.reg_alpha,
+            reg_lambda=cfg.reg_lambda,
+            gamma=cfg.gamma,
             eval_metric=cfg.eval_metric,
             early_stopping_rounds=cfg.early_stopping_rounds if X_val is not None else None,
             random_state=cfg.random_state,
         )
 
-        fit_kwargs: dict = {"X": X, "y": y}
+        fit_kwargs: dict = {
+            "X": X_train,
+            "y": y_train,
+            "sample_weight": sample_weights,
+        }
         if X_val is not None and y_val is not None:
-            fit_kwargs["eval_set"] = [(X_val, y_val)]
+            fit_kwargs["eval_set"] = [(X_val, np.array(y_val, dtype=int))]
             fit_kwargs["verbose"] = False
 
         self._model.fit(**fit_kwargs)

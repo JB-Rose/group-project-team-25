@@ -89,11 +89,43 @@ def main() -> None:
     print(f"  Feature matrix shape: {X.shape}  (sessions x features)")
 
     # ------------------------------------------------------------------
-    # 3. Train/test split
+    # 3. Cross-validation for honest generalization estimate
     # ------------------------------------------------------------------
-    from sklearn.model_selection import train_test_split
+    from sklearn.model_selection import StratifiedKFold, train_test_split
     from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 
+    n_folds = 5
+    print(f"\n[train_classifier] Running {n_folds}-fold stratified cross-validation ...")
+    skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=args.random_state)
+
+    cv_accs, cv_f1s, cv_aucs = [], [], []
+    for fold_i, (train_idx, val_idx) in enumerate(skf.split(X, y), start=1):
+        X_tr, X_va = X[train_idx], X[val_idx]
+        y_tr, y_va = y[train_idx], y[val_idx]
+
+        fold_clf = HumanLikelihoodClassifier()
+        fold_clf.fit(X_tr, y_tr, X_val=X_va, y_val=y_va)
+
+        y_pred_f = fold_clf.predict(X_va)
+        y_score_f = fold_clf.human_score(X_va)
+
+        cv_accs.append(accuracy_score(y_va, y_pred_f))
+        cv_f1s.append(f1_score(y_va, y_pred_f, zero_division=0))
+        try:
+            cv_aucs.append(roc_auc_score(y_va, y_score_f))
+        except ValueError:
+            cv_aucs.append(float("nan"))
+
+        print(f"  Fold {fold_i}: Acc={cv_accs[-1]:.4f}  F1={cv_f1s[-1]:.4f}  AUC={cv_aucs[-1]:.4f}")
+
+    print(f"\n--- Cross-Validation Summary ({n_folds}-fold) ---")
+    print(f"  Accuracy : {np.mean(cv_accs):.4f} +/- {np.std(cv_accs):.4f}")
+    print(f"  F1 Score : {np.mean(cv_f1s):.4f} +/- {np.std(cv_f1s):.4f}")
+    print(f"  ROC-AUC  : {np.nanmean(cv_aucs):.4f} +/- {np.nanstd(cv_aucs):.4f}")
+
+    # ------------------------------------------------------------------
+    # 4. Final model: train/test split for the saved model
+    # ------------------------------------------------------------------
     X_train, X_test, y_train, y_test = train_test_split(
         X, y,
         test_size=args.test_size,
@@ -108,10 +140,7 @@ def main() -> None:
     print(f"\n  Train set: {len(y_train)} ({n_human_train}H / {n_bot_train}B)")
     print(f"  Test set : {len(y_test)} ({n_human_test}H / {n_bot_test}B)")
 
-    # ------------------------------------------------------------------
-    # 4. Train model
-    # ------------------------------------------------------------------
-    print(f"\n[train_classifier] Training on {len(y_train)} sessions ...")
+    print(f"\n[train_classifier] Training final model on {len(y_train)} sessions ...")
     clf = HumanLikelihoodClassifier()
     clf.fit(X_train, y_train, X_val=X_test, y_val=y_test)
 
