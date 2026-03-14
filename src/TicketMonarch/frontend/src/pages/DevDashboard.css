@@ -171,6 +171,12 @@
   gap: 0.5rem;
 }
 
+.action-btn.selected {
+  border-color: #2c7be5;
+  background: #1a4a7a;
+  font-weight: 600;
+}
+
 .action-btn {
   background: #0f3460;
   color: #e0e0e0;

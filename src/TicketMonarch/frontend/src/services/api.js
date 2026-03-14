@@ -82,6 +82,55 @@ export const healthCheck = async () => {
   }
 }
 
+export const setFlag = async (flagValue) => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/set_flag`, {
+      method: "POST",
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        flag: flagValue
+      }),
+    })
+
+    const data = await response.json()
+
+    return {
+      success: response.ok,
+      data: data
+    }
+
+  } catch (error) {
+    console.error("Set flag API error:", error)
+
+    return {
+      success: false,
+      error: "Unable to connect to the server"
+    }
+  }
+}
+
+export const getFlag = async () => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/get_flag`)
+    const data = await response.json()
+
+    return {
+      success: response.ok,
+      data: data
+    }
+
+  } catch (error) {
+    console.error("Get flag API error:", error)
+
+    return {
+      success: false,
+      error: "Unable to connect to the server"
+    }
+  }
+}
+
 export const rollingEvaluate = async (sessionId) => {
   try {
     const response = await fetch(`${API_BASE_URL}/agent/rolling`, {

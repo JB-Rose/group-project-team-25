@@ -51,6 +51,35 @@ def health():
     """Simple health check endpoint."""
     return jsonify({'status': 'ok'}), 200
 
+# Dev dashboard CAPTCHA flag setter / getter
+flagState = {"flag": "inactive"}
+VALID_STATES = {"inactive", "on", "off"}
+
+@app.route('/api/set_flag', methods=['POST'])
+def set_flag():
+    data = request.json or {}
+    state = data.get("flag")
+
+    if state not in VALID_STATES:
+        return jsonify({
+            "success": False,
+            "error": "Invalid flag state"
+        }), 400
+
+    flagState["flag"] = state
+
+    return jsonify({
+        "success": True,
+        "flag": flagState["flag"]
+    }), 200
+
+
+@app.route('/api/get_flag', methods=['GET'])
+def get_flag():
+    return jsonify({
+        "success": True,
+        "flag": flagState["flag"]
+    }), 200
 
 @app.route('/api/checkout', methods=['POST'])
 def checkout():

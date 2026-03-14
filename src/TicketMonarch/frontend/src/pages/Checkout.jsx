@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import './Checkout.css'
-import { submitCheckout, rollingEvaluate } from '../services/api'
+import { submitCheckout, rollingEvaluate, getFlag } from '../services/api'
 import { forceFlush, getSessionId } from '../services/tracking'
 import ChallengeModal from '../components/ChallengeModal'
 
@@ -192,12 +192,35 @@ function Checkout() {
 
     // flush all remaining telemetry then run final evaluation on all the captured data
     await forceFlush()
+    const CAPTCHAFlag = await getFlag()
+    const flag = CAPTCHAFlag?.data?.flag ?? "inactive"
     const rolling = await rollingEvaluate(sessionId)
     const botProb = rolling?.bot_probability || 0
     const eventsProcessed = rolling?.events_processed || 0
 
     console.log(`[RL] session=${sessionId} bot_prob=${(botProb * 100).toFixed(1)}% events=${eventsProcessed} honeypot=${honeypotTriggered}`)
 
+    // Force CAPTCHA flag set in dev dashboard
+    if (flag === "on") {
+      console.log("Force CAPTCHA flag set")
+      setChallengeState({ type: 'puzzle', difficulty: 'hard' })
+      setProcessing(false)
+      return
+    }
+
+    // Force no CAPTCHA flag set in dev dashboard
+    if (flag === "off") {
+      console.log("Force no CAPTCHA flag set")
+      await proceedWithCheckout()
+      setProcessing(false)
+      return
+    }
+
+    // Log of for CAPTCHA flag state
+    if (flag === "inactive") {
+      console.log("Inactive CAPTCHA flag")
+    }
+    
     // Honeypot is always trustworthy so we give hard puzzle.
     if (honeypotTriggered || rolling?.honeypot_triggered) {
       setChallengeState({ type: 'puzzle', difficulty: 'hard' })

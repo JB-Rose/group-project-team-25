@@ -5,6 +5,7 @@ import {
   fetchRecentSessions,
   fetchLiveTelemetry,
   rollingEvaluate,
+  setFlag,
 } from '../services/api'
 
 const ACTION_NAMES = [
@@ -73,6 +74,36 @@ function DevDashboard() {
     if (data) setDashData(data)
     setLoading(false)
   }
+
+  // const setCAPTCHAFlag = async (state) => {
+  //   const result = await setFlag(state)
+
+  //   if (result.success) {
+  //     console.log(`CAPTCHA flag set to ${state}`)
+  //   }
+  //   else {
+  //     console.error(result.error)
+  //   }
+  // }
+
+
+  const [selectedFlag, setSelectedFlag] = useState("inactive");
+  const [flagLoading, setFlagLoading] = useState(false);
+
+  const setCAPTCHAFlag = async (state) => {
+    setFlagLoading(true);
+
+    const result = await setFlag(state);
+
+    if (result.success) {
+      setSelectedFlag(state);
+      console.log(`CAPTCHA flag set to ${state}`);
+    } else {
+      console.error(result.error);
+    }
+
+    setFlagLoading(false);
+  };
 
   const selectSession = (sid) => setSelectedId(sid)
 
@@ -148,6 +179,48 @@ function DevDashboard() {
                 <div className="detail-actions">
                   <button className="action-btn" onClick={runFullAnalysis} disabled={loading}>
                     {loading ? 'Analyzing...' : 'Run Full Analysis'}
+                  </button>
+                </div>
+              </div>
+
+              {/* CAPTCHA Settings */}
+              <div className="detail-section">
+                <h3>CAPTCHA Settings</h3>
+                <div className="telemetry-grid">
+                  {/* <button className="action-btn" onClick={() => setCAPTCHAFlag("on")} disabled={loading}>
+                    {loading ? 'Setting...' : 'Force CATPCHA flag'}
+                  </button>
+                  <button className="action-btn" onClick={() => setCAPTCHAFlag("off")} disabled={loading}>
+                    {loading ? 'Setting...' : 'Force no CAPTCHA flag'}
+                  </button>
+                  <button className="action-btn" onClick={() => setCAPTCHAFlag("inactive")} disabled={loading}>
+                    {loading ? 'Setting...' : 'Deactivate flag'}
+                  </button>*/}
+                  <button
+                    className={`action-btn ${selectedFlag === "on" ? "selected" : ""}`}
+                    onClick={() => setCAPTCHAFlag("on")}
+                    disabled={flagLoading}
+                  >
+                    {selectedFlag === "on" && "✓ "}
+                    {flagLoading ? "Setting..." : "Force CAPTCHA flag"}
+                  </button>
+
+                  <button
+                    className={`action-btn ${selectedFlag === "off" ? "selected" : ""}`}
+                    onClick={() => setCAPTCHAFlag("off")}
+                    disabled={flagLoading}
+                  >
+                    {selectedFlag === "off" && "✓ "}
+                    {flagLoading ? "Setting..." : "Force no CAPTCHA flag"}
+                  </button>
+
+                  <button
+                    className={`action-btn ${selectedFlag === "inactive" ? "selected" : ""}`}
+                    onClick={() => setCAPTCHAFlag("inactive")}
+                    disabled={flagLoading}
+                  >
+                    {selectedFlag === "inactive" && "✓ "}
+                    {flagLoading ? "Setting..." : "Deactivate flag"}
                   </button>
                 </div>
               </div>
