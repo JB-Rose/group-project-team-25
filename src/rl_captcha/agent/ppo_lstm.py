@@ -257,10 +257,18 @@ class PPOLSTM:
         )
 
     def load(self, path: str | Path) -> None:
-        """Load network and optimizer state."""
+        """Load network, optimizer state, and config from checkpoint."""
         path = Path(path)
         checkpoint = torch.load(
             path / "ppo_lstm_checkpoint.pt", map_location=self.device,
         )
+
+        # Restore config if saved (prevents size mismatches from default changes)
+        saved_config = checkpoint.get("config")
+        if saved_config:
+            for key, value in saved_config.items():
+                if hasattr(self.config, key):
+                    setattr(self.config, key, value)
+
         self.network.load_state_dict(checkpoint["network"])
         self.optimizer.load_state_dict(checkpoint["optimizer"])

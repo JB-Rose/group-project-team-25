@@ -170,10 +170,13 @@ def save_order(order_data):
 
 def export_to_csv():
     """
-    Export all checkout data from MySQL to a CSV file in the `data/` folder.
+    Export checkout data from MySQL to a CSV file in the `data/` folder.
+    Card numbers and CVVs are masked for security.
     """
     conn = None
     cursor = None
+    rows = []
+    columns = []
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -181,6 +184,9 @@ def export_to_csv():
         cursor.execute("SELECT * FROM checkouts")
         rows = cursor.fetchall()
         columns = [description[0] for description in cursor.description]
+    except Exception as e:
+        print(f"[export_to_csv] DB error: {e}")
+        raise
     finally:
         if cursor is not None:
             try:
@@ -193,12 +199,27 @@ def export_to_csv():
             except Exception:
                 pass
 
+    # Mask sensitive columns (card_number, card_cvv)
+    sensitive_cols = {"card_number", "card_cvv"}
+    sensitive_indices = [i for i, col in enumerate(columns) if col in sensitive_cols]
+
+    masked_rows = []
+    for row in rows:
+        row = list(row)
+        for idx in sensitive_indices:
+            val = str(row[idx]) if row[idx] else ""
+            if len(val) > 4:
+                row[idx] = "*" * (len(val) - 4) + val[-4:]
+            else:
+                row[idx] = "****"
+        masked_rows.append(row)
+
     csv_path = os.path.join(DATA_DIR, "checkouts.csv")
 
     with open(csv_path, "w", newline="", encoding="utf-8") as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(columns)
-        writer.writerows(rows)
+        writer.writerows(masked_rows)
 
     return csv_path
 
@@ -218,6 +239,8 @@ def export_tracking_data_to_csv():
     """
     conn = None
     cursor = None
+    rows = []
+    columns = []
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -241,6 +264,9 @@ def export_tracking_data_to_csv():
         )
         rows = cursor.fetchall()
         columns = [desc[0] for desc in cursor.description]
+    except Exception as e:
+        print(f"[export_tracking_data_to_csv] DB error: {e}")
+        raise
     finally:
         if cursor is not None:
             try:

@@ -391,6 +391,8 @@ class EventEnv(gym.Env):
         super().reset(seed=seed)
 
         # Balanced 50/50 sampling
+        if not self._sessions:
+            raise RuntimeError("EventEnv has no sessions — load data before calling reset()")
         if self._human_sessions and self._bot_sessions:
             if random.random() < 0.5:
                 session = random.choice(self._human_sessions)

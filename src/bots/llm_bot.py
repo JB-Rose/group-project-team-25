@@ -84,7 +84,7 @@ INJECT_EVENTS_JS = r"""
         if (!target || !['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return;
         // Dispatch a keydown and keyup for each character of inserted data
         const data = e.data || '';
-        for (let i = 0; i < Math.min(data.length, 1); i++) {
+        for (let i = 0; i < data.length; i++) {
             target.dispatchEvent(new KeyboardEvent('keydown', {
                 key: data[i], bubbles: true, cancelable: true
             }));

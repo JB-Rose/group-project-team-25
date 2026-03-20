@@ -9,20 +9,18 @@ Automated bot browsing sessions. Treated as **label=0 (bot)** by the training pi
 ### Selenium Bots
 
 ```bash
-cd bots
-python selenium_bot.py --runs 5 --type scripted
+python bots/selenium_bot.py --runs 5 --type scripted
 ```
 
-The bot opens Chrome with the telemetry extension. After all runs complete, click **"Export JSON"** in the extension popup and save the file here.
+The bot auto-exports telemetry from the backend API after each run and saves JSON files here automatically. No Chrome extension needed — `tracking.js` captures everything.
 
 ### LLM Bot
 
 ```bash
-cd bots
-python llm_bot.py --runs 3 --provider anthropic
+python bots/llm_bot.py --runs 3 --provider anthropic
 ```
 
-Same process — export from the Chrome extension after runs complete.
+Same auto-export behavior — telemetry is pulled from the backend and saved here after each run.
 
 See `bots/README.md` for full setup and options.
 

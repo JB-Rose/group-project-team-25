@@ -1,6 +1,6 @@
 # RL CAPTCHA System
 
-A reinforcement learning-based bot detection system that processes raw user telemetry using a PPO+LSTM agent. Events are grouped into **windows of 30** and encoded as statistical feature vectors (speed variance, timing regularity, path curvature, etc.). The 2-layer LSTM accumulates evidence across all windows, then makes a terminal decision on the **final window** only.
+A reinforcement learning-based bot detection system that processes raw user telemetry using a PPO+LSTM agent. Events are grouped into **windows of 30** and encoded as statistical feature vectors (speed variance, timing regularity, path curvature, etc.). The LSTM accumulates evidence across all windows, then makes a terminal decision on the **final window** only.
 
 This package is fully standalone and does not import from TicketMonarch.
 
@@ -15,10 +15,10 @@ Windowed Event Encoder (26-dim feature vector per 30-event window)
         |  spatial diversity, scroll behavior, interaction quality
         |
         v
-LSTM (256 hidden, 2 layers, dropout 0.1) -- accumulates evidence over windows
+LSTM (128 hidden, 1 layer) -- accumulates evidence over windows
         |
-        |--> Actor head (256 -> 128 -> 64 -> 7 logits) --> action
-        +--> Critic head (256 -> 128 -> 64 -> 1 value) --> V(s)
+        |--> Actor head (128 -> 128 -> 64 -> 7 logits) --> action
+        +--> Critic head (128 -> 128 -> 64 -> 1 value) --> V(s)
 ```
 
 ### Two-Phase Episode Structure with Action Masking
@@ -92,7 +92,7 @@ rl_captcha/
 │
 ├── agent/
 │   ├── ppo_lstm.py              # PPO algorithm with LSTM recurrence + action masks
-│   ├── lstm_networks.py         # LSTMActorCritic (2-layer LSTM, 256 hidden)
+│   ├── lstm_networks.py         # LSTMActorCritic (LSTM, 128 hidden)
 │   ├── rollout_buffer.py        # On-policy buffer with GAE + mask storage
 │   └── checkpoints/
 │       └── ppo_run1/            # Trained model weights
@@ -243,4 +243,4 @@ All methods are thread-safe (wrapped with `threading.Lock`). Online and offline 
 All hyperparameters in `config.py`:
 
 - **EventEnvConfig** -- Window size (30 events), obs dim (26), min events (10), reward weights, puzzle pass rates, action masking, normalization constants, data augmentation
-- **PPOConfig** -- Learning rate (3e-4), gamma (0.99), GAE lambda (0.95), clip ratio (0.2), entropy coefficient (0.01), LSTM (256 hidden, 2 layers)
+- **PPOConfig** -- Learning rate (3e-4), gamma (0.99), GAE lambda (0.95), clip ratio (0.2), entropy coefficient (0.02), LSTM (128 hidden, 1 layer)

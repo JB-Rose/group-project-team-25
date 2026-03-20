@@ -476,10 +476,10 @@ Windowed Event Encoder (26-dimensional feature vector per window of 30 events)
         │  keystroke hold patterns, scroll behavior, spatial spread, etc.
         │
         ▼
-LSTM (256 hidden, 2 layers) ── accumulates temporal evidence across windows
+LSTM (128 hidden, 1 layer) ── accumulates temporal evidence across windows
         │
-        ├──► Actor head (256 → 128 → 64 → 7 logits) ──► action (policy)
-        └──► Critic head (256 → 128 → 64 → 1 value)  ──► V(s) (value estimate)
+        ├──► Actor head (128 → 128 → 64 → 7 logits) ──► action (policy)
+        └──► Critic head (128 → 128 → 64 → 1 value)  ──► V(s) (value estimate)
 ```
 
 The LSTM processes **windows of events** sequentially. Each window contains 30 events and is encoded into a 26-dimensional statistical feature vector capturing behavioral patterns (speed variance, timing regularity, path curvature, etc.) that single events cannot represent. At every timestep (window), the agent chooses one of 7 actions. Most of the time it chooses `continue` (keep watching). When it has seen enough evidence, it makes a terminal decision: allow, block, or deploy a puzzle challenge.
@@ -611,20 +611,19 @@ Input: (batch, seq_len, 26)   ← windowed feature vectors
               │
               ▼
      ┌──────────────────┐
-     │  LSTM Layer ×2    │
+     │  LSTM Layer       │
      │  input:  26       │
-     │  hidden: 256      │
-     │  layers: 2        │
+     │  hidden: 128      │
+     │  layers: 1        │
      │  batch_first      │
-     │  + dropout 0.1    │
      └────────┬─────────┘
-              │ (batch, seq_len, 256)
+              │ (batch, seq_len, 128)
               │
        ┌──────┴──────┐
        ▼              ▼
 ┌───────────────┐ ┌───────────────┐
 │  Actor Head   │ │  Critic Head  │
-│ Linear(256→128)│ │ Linear(256→128)│
+│ Linear(128→128)│ │ Linear(128→128)│
 │ Tanh          │ │ Tanh          │
 │ Linear(128→64)│ │ Linear(128→64)│
 │ Tanh          │ │ Tanh          │
@@ -636,10 +635,9 @@ Input: (batch, seq_len, 26)   ← windowed feature vectors
     (7-dim)        (scalar)
 ```
 
-- **~900K total parameters** — still fast on CPU but with much more capacity
-- **2-layer LSTM** with dropout between layers for regularization
-- **LSTM hidden state** (h ∈ ℝ²⁵⁶) carries temporal context across windows
-- **Cell state** (c ∈ ℝ²⁵⁶) stores long-range behavioral patterns
+- **1-layer LSTM** (128 hidden units) processes windowed features sequentially
+- **LSTM hidden state** (h ∈ ℝ¹²⁸) carries temporal context across windows
+- **Cell state** (c ∈ ℝ¹²⁸) stores long-range behavioral patterns
 - The actor outputs a probability distribution over 7 actions (softmax of logits)
 - The critic estimates the expected future reward from the current state
 - **Deeper heads** (3 linear layers each) allow more expressive decision boundaries
@@ -655,15 +653,15 @@ Input: (batch, seq_len, 26)   ← windowed feature vectors
 | GAE lambda (λ) | 0.95 | Bias-variance tradeoff for advantage estimation |
 | PPO clip (ε) | 0.2 | Limits how far the new policy can deviate from the old |
 | Value loss coefficient | 0.5 | Weight of critic loss in total loss |
-| Entropy coefficient | 0.01 | Encourages exploration by penalizing overly confident policies |
+| Entropy coefficient | 0.02 | Encourages exploration by penalizing overly confident policies |
 | Max gradient norm | 0.5 | Gradient clipping for training stability |
-| Rollout buffer size | 2048 | Steps collected before each PPO update |
+| Rollout buffer size | 4096 | Steps collected before each PPO update |
 | PPO epochs | 4 | Number of passes over the buffer per update |
 | Total timesteps | 500,000 | Total training steps |
 
 **Training loop:**
 
-1. **Collect rollout:** Run the agent in the environment for 2048 steps, storing observations, actions, rewards, log-probs, and values. Episodes are sampled 50/50 between human and bot sessions.
+1. **Collect rollout:** Run the agent in the environment for 4096 steps, storing observations, actions, rewards, log-probs, and values. Episodes are sampled 50/50 between human and bot sessions.
 2. **Compute advantages:** Use Generalized Advantage Estimation (GAE) to compute per-step advantages and returns. Bootstrap the final value if the episode is not done.
 3. **PPO update:** For 4 epochs over the collected buffer:
    - Replay each episode segment through the LSTM from its initial hidden state (preserving temporal continuity)

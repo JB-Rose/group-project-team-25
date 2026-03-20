@@ -1202,12 +1202,17 @@ def main():
                     erratic_bot(driver)
                 elif bot_type == "speedrun":
                     speedrun_bot(driver)
+                run_succeeded = True
                 print(f"  Run {i + 1} complete.")
             except Exception as e:
+                run_succeeded = False
                 print(f"  Run {i + 1} failed: {e}")
 
-            # Auto-export telemetry and confirm as bot
-            _export_and_confirm(driver, i + 1)
+            # Auto-export telemetry and confirm as bot (skip if run failed)
+            if run_succeeded:
+                _export_and_confirm(driver, i + 1)
+            else:
+                print("  Skipping export — run did not complete successfully")
 
             if i < args.runs - 1:
                 print(f"  Waiting {args.pause_between}s...")

@@ -22,7 +22,6 @@
 | Frontend | React 18.2, Vite 5, React Router DOM 6, vanilla CSS  |
 | Backend | Python 3.12, Flask 3.0, Flask-CORS, mysql-connector-python |
 | Database | MySQL 8.0+ |
-| Deployment | |
 
 ---
 
@@ -30,9 +29,9 @@
 
 ### Prerequisites
 
-- [Python] 3.12+
-- [Node.js] 18+
-- [MySQL] 8.0+
+- Python 3.12+
+- Node.js 18+
+- MySQL 8.0+
 
 ### Installation
 
