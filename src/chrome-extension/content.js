@@ -36,6 +36,7 @@
   let scrollBuffer = []
 
   let lastMouseEvent = null
+  let mouseMovedSinceSample = false
   let lastInteractionTime = performance.now()
   let lastClickTimestamp = null
   let lastKeyTimestampByField = {}
@@ -121,6 +122,7 @@
     clickBuffer = []
     keystrokeBuffer = []
     scrollBuffer = []
+    mouseMovedSinceSample = false
     lastClickTimestamp = null
     lastKeyTimestampByField = {}
     lastScrollTimestamp = null
@@ -150,11 +152,12 @@
       pageX: event.pageX,
       pageY: event.pageY
     }
+    mouseMovedSinceSample = true
     touchInteraction()
   }
 
   function sampleMousePosition() {
-    if (!lastMouseEvent || isIdle || !recording) return
+    if (!lastMouseEvent || !mouseMovedSinceSample || isIdle || !recording) return
 
     mouseBuffer.push({
       x: lastMouseEvent.x,
@@ -163,6 +166,7 @@
       pageY: lastMouseEvent.pageY,
       t: performance.now()
     })
+    mouseMovedSinceSample = false
   }
 
   // ── Click tracking ────────────────────────────────────────────────
@@ -225,14 +229,15 @@
     lastKeyTimestampByField[fieldId] = now
 
     const key = LOGGABLE_KEYS.has(event.key) ? event.key : null
-
-    keystrokeBuffer.push({
+    const keystroke = {
       field: fieldId,
       type: 'down',
       t: now,
-      dt_since_last: dt,
-      key: key
-    })
+      dt_since_last: dt
+    }
+    if (key) keystroke.key = key
+
+    keystrokeBuffer.push(keystroke)
   }
 
   function handleKeyUp(event) {
@@ -243,13 +248,14 @@
     const now = performance.now()
     const fieldId = _getFieldId(event.target)
     const key = LOGGABLE_KEYS.has(event.key) ? event.key : null
-
-    keystrokeBuffer.push({
+    const keystroke = {
       field: fieldId,
       type: 'up',
-      t: now,
-      key: key
-    })
+      t: now
+    }
+    if (key) keystroke.key = key
+
+    keystrokeBuffer.push(keystroke)
   }
 
   // ── Scroll tracking ───────────────────────────────────────────────
@@ -389,17 +395,19 @@
     document.addEventListener('visibilitychange', handleVisibilityChange)
 
     // Start timers
-    mouseIntervalId = setInterval(sampleMousePosition, MOUSE_SAMPLE_INTERVAL_MS)
+    if (!mouseIntervalId) {
+      mouseIntervalId = setInterval(sampleMousePosition, MOUSE_SAMPLE_INTERVAL_MS)
+    }
     flushIntervalId = setInterval(periodicFlush, 1000)
     idleCheckIntervalId = setInterval(checkIdle, 1000)
   }
 
   function stopRecording() {
     if (!recording) return
-    recording = false
 
     // Final flush
     flushBuffers(true)
+    recording = false
 
     // Remove listeners (must match the capture flag used in addEventListener)
     window.removeEventListener('mousemove', handleMouseMove, { capture: true })

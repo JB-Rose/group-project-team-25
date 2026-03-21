@@ -131,6 +131,11 @@ class AgentService:
             if len(window) >= self.env_config.min_events:
                 windows.append(window)
 
+        max_w = self.env_config.max_windows
+        if len(windows) > max_w:
+            indices = np.linspace(0, len(windows) - 1, max_w, dtype=int)
+            windows = [windows[i] for i in indices]
+
         return timeline, windows
 
     def evaluate_session(self, session: Session) -> dict:
@@ -397,7 +402,8 @@ class AgentService:
 
     def get_hidden_state_info(self) -> dict:
         """Return LSTM hidden state for visualization (last layer only)."""
-        h, c = self.agent.get_hidden()
+        with self._lock:
+            h, c = self.agent.get_hidden()
         # h shape: (num_layers, 1, hidden_size) — use last layer for viz
         last_h = h[-1].squeeze(0).cpu().numpy()  # (hidden_size,)
         return {

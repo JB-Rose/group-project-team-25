@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import './Checkout.css'
-import { submitCheckout, rollingEvaluate, getFlag } from '../services/api'
+import { submitCheckout, rollingEvaluate, evaluateSession, getFlag } from '../services/api'
 import { forceFlush, getSessionId } from '../services/tracking'
 import ChallengeModal from '../components/ChallengeModal'
 
@@ -190,15 +190,15 @@ function Checkout() {
 
     const sessionId = getSessionId()
 
-    // flush all remaining telemetry then run final evaluation on all the captured data
+    // Flush all remaining telemetry, then run the terminal policy once.
     await forceFlush()
     const CAPTCHAFlag = await getFlag()
     const flag = CAPTCHAFlag?.data?.flag ?? "inactive"
-    const rolling = await rollingEvaluate(sessionId)
-    const botProb = rolling?.bot_probability || 0
-    const eventsProcessed = rolling?.events_processed || 0
+    const finalEval = await evaluateSession(sessionId)
+    const decision = finalEval?.decision
+    const eventsProcessed = finalEval?.events_processed || 0
 
-    console.log(`[RL] session=${sessionId} bot_prob=${(botProb * 100).toFixed(1)}% events=${eventsProcessed} honeypot=${honeypotTriggered}`)
+    console.log(`[RL] session=${sessionId} decision=${decision || 'unknown'} events=${eventsProcessed} honeypot=${honeypotTriggered}`)
 
     // Force CAPTCHA flag set in dev dashboard
     if (flag === "on") {
@@ -222,22 +222,37 @@ function Checkout() {
     }
     
     // Honeypot is always trustworthy so we give hard puzzle.
-    if (honeypotTriggered || rolling?.honeypot_triggered) {
+    if (honeypotTriggered || finalEval?.honeypot_triggered) {
       setChallengeState({ type: 'puzzle', difficulty: 'hard' })
       setProcessing(false)
       return
     }
 
-    // High suspicion → challenge based on severity
-    if (botProb > 0.45) {
-      const difficulty = botProb > 0.7 ? 'hard' : botProb > 0.55 ? 'medium' : 'easy'
-      setChallengeState({ type: 'puzzle', difficulty })
+    if (!finalEval?.success) {
+      setSubmitMessage('Verification service unavailable. Please try again.')
       setProcessing(false)
       return
     }
 
-    // Low suspicion → allow through
-    await proceedWithCheckout()
+    if (decision === 'allow') {
+      await proceedWithCheckout()
+      setProcessing(false)
+      return
+    }
+
+    if (decision === 'block') {
+      setChallengeState({ type: 'blocked' })
+      setProcessing(false)
+      return
+    }
+
+    if (['easy_puzzle', 'medium_puzzle', 'hard_puzzle'].includes(decision)) {
+      setChallengeState({ type: 'puzzle', difficulty: decision.replace('_puzzle', '') })
+      setProcessing(false)
+      return
+    }
+
+    setSubmitMessage('Unexpected verification response. Please try again.')
     setProcessing(false)
   }
 

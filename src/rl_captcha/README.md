@@ -130,13 +130,15 @@ Dependencies: PyTorch, Gymnasium, NumPy, scikit-learn, matplotlib.
 
 ## Data
 
-Training data lives in `data/human/` (label=1) and `data/bot/` (label=0). All events from a session are used (no truncation). Data is split 70/15/15 (train/val/test) with stratified sampling.
+Training data lives in `data/human/` (label=1) and `data/bot/` (label=0). Sessions are converted into overlapping 30-event windows, then capped to `max_windows` for training, inference, and online learning. Data is split 70/15/15 (train/val/test) with stratified sampling.
 
 **Supported file formats:**
 - `session_*.json` -- Live-confirm format from Dev Dashboard: `{ "sessionId": "...", "segments": [{ "mouse": [...], ... }] }`
 - `telemetry_*.json` -- Chrome extension export: `{ "<sessionId>": { "segments": [...], "pageMeta": [...] } }`
 
 **Important:** Only include data from the TicketMonarch site (localhost). Data from external sites will pollute the training distribution.
+
+**Current note:** telemetry collection semantics were updated to avoid inflated mouse traces and dropped batches. Recollect fresh human and bot data before training a new checkpoint.
 
 ## Training
 
@@ -291,7 +293,7 @@ The correct agent class (PPOLSTM, DGLSTM, or SoftPPOLSTM) is instantiated automa
 
 **Methods:**
 
-- **`evaluate_session()`** -- Full evaluation with action masking: processes all windows through LSTM, applies observation mask on non-final windows and decision mask on the final window
+- **`evaluate_session()`** -- Full evaluation with action masking: processes all windows through LSTM, applies observation mask on non-final windows and decision mask on the final window, and returns the terminal policy action used by checkout
 - **`rolling_evaluate()`** -- Lightweight polling: returns bot probability from the final window's action distribution
 - **`online_learn()`** -- Polymorphic update after confirmed human/bot sessions (3 epochs, 60% learning rate). Each algorithm's `update()` method is called automatically (PPO clip, DG delight-gated, Soft PPO adaptive entropy). Logs before/after comparison to `online_training.log`
 
@@ -301,7 +303,7 @@ All methods are thread-safe (wrapped with `threading.Lock`). Online and offline 
 
 All hyperparameters in `config.py` and per-algorithm config classes:
 
-- **EventEnvConfig** -- Window size (30 events), obs dim (26), min events (10), reward weights, puzzle pass rates, action masking, normalization constants, data augmentation
+- **EventEnvConfig** -- Window size (30 events), obs dim (26), min events (10), max windows (`256`), reward weights, puzzle pass rates, action masking, normalization constants, data augmentation
 - **PPOConfig** -- Learning rate (3e-4), gamma (0.99), GAE lambda (0.95), clip ratio (0.2), entropy coefficient (0.02), LSTM (128 hidden, 1 layer)
 - **DGConfig** (extends PPOConfig) -- `dg_temperature` (sigmoid temperature η), `dg_baseline_weight` (PPO blend weight)
 - **SoftPPOConfig** (extends PPOConfig) -- `target_entropy_ratio` (fraction of max entropy), `alpha_lr` (temperature learning rate), `init_log_alpha`, `alpha_min`, `alpha_max`

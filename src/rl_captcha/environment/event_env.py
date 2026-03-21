@@ -188,23 +188,23 @@ class EventEncoder:
             vec[12] = min(_safe_var(click_dts), cfg.max_dt_ms ** 2) / (cfg.max_dt_ms ** 2)
 
         # ── Keystroke features [13-16] ───────────────────────────────
-        key_downs = {}
+        key_downs: dict[str, list[float]] = {}
         key_holds = []
         key_down_times = []
         for e in events:
             if e["_type"] == EVENT_KEY_DOWN:
-                key = e.get("key", e.get("field", ""))
+                key = e.get("field") or e.get("key") or ""
                 t = e.get("t", e.get("timestamp", 0)) or 0
-                key_downs[key] = t
+                key_downs.setdefault(key, []).append(t)
                 key_down_times.append(t)
             elif e["_type"] == EVENT_KEY_UP:
-                key = e.get("key", e.get("field", ""))
+                key = e.get("field") or e.get("key") or ""
                 t = e.get("t", e.get("timestamp", 0)) or 0
-                if key in key_downs:
-                    hold = t - key_downs[key]
+                pending = key_downs.get(key)
+                if pending:
+                    hold = t - pending.pop(0)
                     if 0 < hold < 2000:
                         key_holds.append(hold)
-                    del key_downs[key]
 
         if key_holds:
             vec[13] = min(_safe_mean(key_holds), 1000) / 1000

@@ -53,6 +53,16 @@ INJECT_EVENTS_JS = r"""
     if (window.__tmEventInjectorLoaded) return;
     window.__tmEventInjectorLoaded = true;
 
+    function dispatchMouseMoveBurst(x, y) {
+        for (let i = 0; i < 2; i++) {
+            const jitterX = x + (Math.random() - 0.5) * 12;
+            const jitterY = y + (Math.random() - 0.5) * 8;
+            window.dispatchEvent(new MouseEvent('mousemove', {
+                clientX: jitterX, clientY: jitterY, bubbles: true
+            }));
+        }
+    }
+
     // Patch click() to also dispatch a real MouseEvent on window
     const origClick = HTMLElement.prototype.click;
     HTMLElement.prototype.click = function() {
@@ -60,6 +70,7 @@ INJECT_EVENTS_JS = r"""
         const rect = this.getBoundingClientRect();
         const x = rect.left + rect.width / 2;
         const y = rect.top + rect.height / 2;
+        dispatchMouseMoveBurst(x, y);
         window.dispatchEvent(new MouseEvent('click', {
             clientX: x, clientY: y, bubbles: true, button: 0
         }));
@@ -72,9 +83,7 @@ INJECT_EVENTS_JS = r"""
         const rect = this.getBoundingClientRect();
         const x = rect.left + rect.width / 2;
         const y = rect.top + rect.height / 2;
-        window.dispatchEvent(new MouseEvent('mousemove', {
-            clientX: x, clientY: y, bubbles: true
-        }));
+        dispatchMouseMoveBurst(x, y);
     };
 
     // Monitor input events (from CDP insertText) and convert to keydown/keyup
@@ -105,20 +114,6 @@ INJECT_EVENTS_JS = r"""
         origScrollBy.apply(this, arguments);
         window.dispatchEvent(new Event('scroll'));
     };
-
-    // Periodically generate subtle mouse movements to simulate human presence
-    // (browser-use doesn't move the mouse between actions)
-    let _lastMouseX = 500, _lastMouseY = 400;
-    setInterval(function() {
-        // Small random jitter around last known position
-        _lastMouseX += (Math.random() - 0.5) * 30;
-        _lastMouseY += (Math.random() - 0.5) * 20;
-        _lastMouseX = Math.max(10, Math.min(window.innerWidth - 10, _lastMouseX));
-        _lastMouseY = Math.max(10, Math.min(window.innerHeight - 10, _lastMouseY));
-        window.dispatchEvent(new MouseEvent('mousemove', {
-            clientX: _lastMouseX, clientY: _lastMouseY, bubbles: true
-        }));
-    }, 50 + Math.random() * 100);  // ~8-14 Hz, slightly irregular
 
     console.log('[TM] Event injector loaded — DOM events will be generated');
 })();

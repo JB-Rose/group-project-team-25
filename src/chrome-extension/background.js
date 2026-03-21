@@ -200,7 +200,13 @@ async function exportData() {
     let currentSeg = null
 
     for (const seg of session.segments) {
-      if (currentSeg && currentSeg.segmentId === seg.segmentId) {
+      const sameSegment = currentSeg &&
+        currentSeg.segmentId === seg.segmentId &&
+        currentSeg.tabId === seg.tabId &&
+        currentSeg.url === seg.url &&
+        currentSeg.hostname === seg.hostname
+
+      if (sameSegment) {
         currentSeg.mouse.push(...seg.mouse)
         currentSeg.clicks.push(...seg.clicks)
         currentSeg.keystrokes.push(...seg.keystrokes)

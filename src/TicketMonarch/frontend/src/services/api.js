@@ -154,7 +154,7 @@ export const evaluateSession = async (sessionId) => {
     return await response.json()
   } catch (error) {
     console.error('Agent evaluation error:', error)
-    return { success: true, decision: 'allow', action_index: 5, reason: 'agent_unreachable' }
+    return { success: false, decision: 'allow', action_index: 5, reason: 'agent_unreachable' }
   }
 }
 

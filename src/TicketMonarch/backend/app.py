@@ -349,11 +349,12 @@ def agent_rolling():
         traceback.print_exc()
         return jsonify({
             'success': False,
+            'error': str(e),
             'bot_probability': 0.0,
             'deploy_honeypot': False,
             'events_processed': 0,
             'honeypot_triggered': False,
-        }), 200  # Fail open — don't break the form
+        }), 500
 
 
 @app.route('/api/agent/evaluate', methods=['POST'])
@@ -558,6 +559,7 @@ def agent_confirm():
 
         db_session = get_user_session(session_id)
         if not db_session:
+            print(f'[agent_confirm] ERROR: Session {session_id} not found in database!')
             return jsonify({'success': False, 'error': 'session not found'}), 404
 
         from rl_captcha.data.loader import Session
@@ -578,7 +580,7 @@ def agent_confirm():
             data_dir = Path(__file__).resolve().parent.parent.parent / 'data' / 'human'
             data_dir.mkdir(parents=True, exist_ok=True)
 
-            ts = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H-%M-%S')
+            ts = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H-%M-%S-%f')
             json_path = data_dir / f'session_{session_id[:12]}_{ts}.json'
 
             export_payload = {
@@ -598,6 +600,7 @@ def agent_confirm():
                 print(f'[agent_confirm] Saved human session to {json_path.name}')
             except Exception as save_err:
                 print(f'[agent_confirm] WARNING: Failed to save JSON: {save_err}')
+                json_path = None  # Don't report success if save failed
 
         agent_svc = _get_agent_service()
         result = agent_svc.online_learn(session, true_label)

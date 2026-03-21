@@ -4,7 +4,7 @@ Developed by Team 25 - San Jose State University
 
 Ticket Monarch is a mock web application for concert ticket booking.
 
-In this mock environment, users will browse concerts, select their seats, and checkout. During this process, the system tracks mouse moevments, clicks, keystrokes, and scrolls.
+In this mock environment, users will browse concerts, select their seats, and checkout. During this process, the system tracks mouse movements, clicks, keystrokes, and scrolls.
 
 At checkout, a reinforcement learning agent (PPO, DG, or Soft PPO — all LSTM-based) evaluates the session, producing a bot vs. human detection output. The algorithm is selected via the `RL_ALGORITHM` environment variable (`ppo`, `dg`, or `soft_ppo`; defaults to `ppo`).
 
@@ -50,6 +50,7 @@ Open two terminals:
 # Terminal 1: Backend
 cd TicketMonarch/backend
 venv\Scripts\activate
+set RL_ALGORITHM=dg            # ppo, dg, or soft_ppo (defaults to ppo)
 python app.py                  # http://localhost:5000
 
 # Terminal 2: Frontend
@@ -64,11 +65,10 @@ Vite proxies `/api/*` to Flask. Access the app at **http://localhost:3000**.
 1. **Home** (`/`) — Browse concerts, select one
 2. **Seat Selection** (`/seats/:id`) — Pick seats from interactive layout
 3. **Checkout** (`/checkout`) — Fill payment form
-   - Rolling inference polls every 3s, deploys honeypot if suspicious
-   - On "Purchase": telemetry force-flushed, agent evaluates full session
+   - Rolling inference polls every 3s and can request honeypot deployment
+   - On "Purchase": telemetry is force-flushed, then `/api/agent/evaluate` makes the final policy decision
+   - Policy outputs map directly to `allow`, `block`, or `easy/medium/hard` puzzle
    - Honeypot triggered → instant hard puzzle
-   - High bot probability → scaled puzzle (easy/medium/hard based on confidence)
-   - Low suspicion → checkout proceeds
 4. **Confirmation** (`/confirmation`) — Order confirmed, session sent for online RL update, session resets
 
 ## Telemetry
@@ -77,10 +77,12 @@ The frontend captures behavioral signals and batches them to the backend every 5
 
 | Signal | Rate | Data |
 |--------|------|------|
-| Mouse movement | ~66Hz (15ms sampling) | x, y, timestamp |
+| Mouse movement | sampled after real movement | x, y, timestamp |
 | Clicks | Every click | x, y, button, target element, time delta |
 | Keystrokes | Every key in form fields | field ID, down/up, timestamp, special keys only |
 | Scroll | Every scroll | scrollX, scrollY, delta, time delta |
+
+Telemetry writes are retried if the backend is temporarily unavailable, so failed flushes are not silently discarded.
 
 ## Dev Dashboard
 

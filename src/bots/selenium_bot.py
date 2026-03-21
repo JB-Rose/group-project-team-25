@@ -23,6 +23,7 @@ import argparse
 import json
 import math
 import random
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,6 +33,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
+from selenium.common.exceptions import StaleElementReferenceException
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import Select, WebDriverWait
 
@@ -228,7 +230,7 @@ def _idle_fidget(driver, duration: float = None):
     detectable: real humans never hold the mouse perfectly still.
     """
     if duration is None:
-        duration = random.uniform(0.8, 3.0)
+        duration = random.uniform(0.2, 0.7)
 
     elapsed = 0.0
     while elapsed < duration:
@@ -240,16 +242,16 @@ def _idle_fidget(driver, duration: float = None):
 
         if behavior == "drift":
             # Slow drift in a random direction (reading, scanning)
-            steps = random.randint(8, 20)
-            dx_bias = random.gauss(0, 80)
-            dy_bias = random.gauss(0, 50)
+            steps = random.randint(4, 9)
+            dx_bias = random.gauss(0, 35)
+            dy_bias = random.gauss(0, 22)
             actions = ActionChains(driver)
             for _ in range(steps):
-                dx = int(dx_bias / steps + random.gauss(0, 5))
-                dy = int(dy_bias / steps + random.gauss(0, 4))
+                dx = int(dx_bias / steps + random.gauss(0, 2))
+                dy = int(dy_bias / steps + random.gauss(0, 2))
                 if dx != 0 or dy != 0:
                     actions.move_by_offset(dx, dy)
-                pause = random.uniform(0.03, 0.12)
+                pause = random.uniform(0.02, 0.06)
                 actions.pause(pause)
                 elapsed += pause
             try:
@@ -260,13 +262,13 @@ def _idle_fidget(driver, duration: float = None):
         elif behavior == "jitter":
             # Tremor-like movements (hand not perfectly steady)
             actions = ActionChains(driver)
-            jitter_count = random.randint(4, 10)
+            jitter_count = random.randint(2, 5)
             for _ in range(jitter_count):
-                dx = random.randint(-12, 12)
-                dy = random.randint(-8, 8)
+                dx = random.randint(-6, 6)
+                dy = random.randint(-4, 4)
                 if dx != 0 or dy != 0:
                     actions.move_by_offset(dx, dy)
-                pause = random.uniform(0.02, 0.08)
+                pause = random.uniform(0.01, 0.04)
                 actions.pause(pause)
                 elapsed += pause
             try:
@@ -277,8 +279,8 @@ def _idle_fidget(driver, duration: float = None):
         elif behavior == "circle":
             # Circular/arc movement (hovering indecisively)
             actions = ActionChains(driver)
-            radius = random.uniform(25, 80)
-            arc_steps = random.randint(8, 16)
+            radius = random.uniform(12, 35)
+            arc_steps = random.randint(4, 8)
             start_angle = random.uniform(0, 2 * math.pi)
             for i in range(arc_steps):
                 angle = start_angle + (i / arc_steps) * math.pi * random.uniform(0.5, 1.5)
@@ -286,7 +288,7 @@ def _idle_fidget(driver, duration: float = None):
                 dy = int(radius * math.sin(angle) / arc_steps * 2)
                 if dx != 0 or dy != 0:
                     actions.move_by_offset(dx, dy)
-                pause = random.uniform(0.03, 0.10)
+                pause = random.uniform(0.01, 0.05)
                 actions.pause(pause)
                 elapsed += pause
             try:
@@ -296,7 +298,7 @@ def _idle_fidget(driver, duration: float = None):
 
         else:  # pause
             # Brief stillness (but not too long — humans fidget again quickly)
-            pause = random.uniform(0.2, 0.8)
+            pause = random.uniform(0.08, 0.25)
             time.sleep(pause)
             elapsed += pause
 
@@ -308,19 +310,19 @@ def _page_sweep(driver):
     This is critical for spatial diversity: humans don't keep the mouse near
     one element — they sweep across hundreds of pixels while browsing.
     """
-    # Pick 2-4 random target regions across the viewport
-    num_targets = random.randint(2, 4)
+    # Keep sweeps small so bot sessions do not dwarf real checkout sessions.
+    num_targets = random.randint(1, 2)
     actions = ActionChains(driver)
 
     for _ in range(num_targets):
         # Random point across the full viewport
-        target_x = random.randint(-400, 400)
-        target_y = random.randint(-300, 300)
+        target_x = random.randint(-180, 180)
+        target_y = random.randint(-120, 120)
 
         # Move there in a Bezier-like curve with multiple steps
-        steps = random.randint(12, 25)
-        curve_x = random.uniform(-60, 60)
-        curve_y = random.uniform(-40, 40)
+        steps = random.randint(5, 10)
+        curve_x = random.uniform(-25, 25)
+        curve_y = random.uniform(-18, 18)
 
         for i in range(steps):
             t = (i + 1) / steps
@@ -333,10 +335,10 @@ def _page_sweep(driver):
                      + random.gauss(0, 2))
             if dx != 0 or dy != 0:
                 actions.move_by_offset(dx, dy)
-            actions.pause(random.uniform(0.01, 0.04))
+            actions.pause(random.uniform(0.01, 0.02))
 
         # Pause at the target (reading/looking)
-        actions.pause(random.uniform(0.3, 1.0))
+        actions.pause(random.uniform(0.08, 0.25))
 
     try:
         actions.perform()
@@ -399,14 +401,20 @@ def _go_home(driver):
 
 def _pick_concert(driver, move_fn):
     """Click a concert's 'Tickets' button on the home page."""
-    buttons = driver.find_elements(By.CSS_SELECTOR, ".tickets-button")
-    if not buttons:
-        print("  WARNING: No .tickets-button found on home page")
-        return False
-    target = random.choice(buttons)
-    move_fn(driver, target)
-    wait_for_url(driver, "/seats/")
-    return True
+    for _ in range(3):
+        buttons = driver.find_elements(By.CSS_SELECTOR, ".tickets-button")
+        if not buttons:
+            print("  WARNING: No .tickets-button found on home page")
+            return False
+        target = random.choice(buttons)
+        try:
+            move_fn(driver, target)
+            wait_for_url(driver, "/seats/")
+            return True
+        except StaleElementReferenceException:
+            time.sleep(0.5)
+    print("  WARNING: Failed to click concert button after retries")
+    return False
 
 
 def _pick_section(driver, move_fn):
@@ -427,17 +435,21 @@ def _pick_section(driver, move_fn):
     chosen = random.sample(cells, num_sections)
 
     for cell in chosen:
-        # The "+" button is the second .ss-step-btn inside the cell
-        plus_buttons = cell.find_elements(By.CSS_SELECTOR, ".ss-step-btn")
-        if len(plus_buttons) < 2:
-            continue
-        plus_btn = plus_buttons[1]  # [0]=minus, [1]=plus
+        try:
+            # The "+" button is the second .ss-step-btn inside the cell
+            plus_buttons = cell.find_elements(By.CSS_SELECTOR, ".ss-step-btn")
+            if len(plus_buttons) < 2:
+                continue
+            plus_btn = plus_buttons[1]  # [0]=minus, [1]=plus
 
-        # Click + between 1 and 4 times to add tickets
-        num_tickets = random.randint(1, 4)
-        for _ in range(num_tickets):
-            move_fn(driver, plus_btn)
-            time.sleep(random.uniform(0.15, 0.4))
+            # Click + between 1 and 4 times to add tickets
+            num_tickets = random.randint(1, 4)
+            for _ in range(num_tickets):
+                move_fn(driver, plus_btn)
+                time.sleep(random.uniform(0.15, 0.4))
+        except StaleElementReferenceException:
+            print("  WARNING: Stale element in seat selection, skipping section")
+            continue
 
     # Click the checkout button
     try:
@@ -471,15 +483,17 @@ def _handle_challenge(driver, move_fn, max_retries=3):
         time.sleep(0.5)
 
         # Try the "Go Back" button (blocked state)
-        go_back = driver.find_elements(By.CSS_SELECTOR, ".challenge-overlay .challenge-btn")
-        if go_back:
-            # Check if it's a simple "Go Back" button (blocked)
-            btn_text = go_back[0].text.strip().lower()
-            if btn_text == "go back":
-                print("  Blocked by agent — clicking Go Back")
-                go_back[0].click()
-                time.sleep(1)
-                return
+        try:
+            go_back = driver.find_elements(By.CSS_SELECTOR, ".challenge-overlay .challenge-btn")
+            if go_back:
+                btn_text = go_back[0].text.strip().lower()
+                if btn_text == "go back":
+                    print("  Blocked by agent — clicking Go Back")
+                    go_back[0].click()
+                    time.sleep(1)
+                    return
+        except StaleElementReferenceException:
+            continue
 
         # Try slider challenge: drag the slider thumb to a random position
         slider_thumb = driver.find_elements(By.CSS_SELECTOR, ".slider-track")
@@ -565,12 +579,16 @@ def _handle_challenge(driver, move_fn, max_retries=3):
         print("  Challenge not solved after all retries — moving on")
 
 
-def _fill_checkout(driver, type_fn, move_fn):
+def _fill_checkout(driver, type_fn, move_fn, skip_honeypot=False):
     """Fill out the checkout form and submit.
 
     Fills every input field found on the page. Known fields get realistic
     fake data; any unknown fields (e.g. hidden honeypots) get generic
     filler — just like a real scraper bot that parses the DOM.
+
+    If skip_honeypot=True, only visible known fields are filled (skips
+    hidden/unknown fields). This forces the RL agent to make the detection
+    decision instead of the honeypot short-circuiting it.
     """
     form = get_form_data()
     wait_for(driver, "#card_number", timeout=10)
@@ -597,7 +615,7 @@ def _fill_checkout(driver, type_fn, move_fn):
     all_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='text'], input[type='tel'], input[type='email'], input:not([type])")
     filler_idx = 0
 
-    for inp in all_inputs:
+    for i, inp in enumerate(all_inputs):
         try:
             field_id = inp.get_attribute("id") or inp.get_attribute("name") or ""
 
@@ -608,7 +626,10 @@ def _fill_checkout(driver, type_fn, move_fn):
             # Determine value: use known data if available, generic filler otherwise
             value = known_values.get(field_id)
             if value is None:
-                # Unknown field — fill with generic data (this catches honeypots)
+                if skip_honeypot:
+                    # Smart bot: skip unknown fields (avoids honeypots)
+                    continue
+                # Dumb bot: fill with generic data (this catches honeypots)
                 value = GENERIC_FILLERS[filler_idx % len(GENERIC_FILLERS)]
                 filler_idx += 1
 
@@ -649,6 +670,19 @@ def _fill_checkout(driver, type_fn, move_fn):
                 _idle_fidget(driver, random.uniform(0.3, 1.0))
             else:
                 time.sleep(random.uniform(0.2, 0.6))
+        except StaleElementReferenceException:
+            # Re-find input fields and retry this one
+            try:
+                refreshed = driver.find_elements(By.CSS_SELECTOR, "input[type='text'], input[type='tel'], input[type='email'], input:not([type])")
+                if i < len(refreshed):
+                    inp = refreshed[i]
+                    field_id = inp.get_attribute("id") or inp.get_attribute("name") or ""
+                    value = known_values.get(field_id, GENERIC_FILLERS[filler_idx % len(GENERIC_FILLERS)])
+                    if value and inp.is_displayed():
+                        move_fn(driver, inp, click_only=True)
+                        type_fn(inp, value)
+            except Exception:
+                pass
         except Exception as e:
             print(f"  WARNING: Could not fill field: {e}")
 
@@ -681,7 +715,7 @@ def _fill_checkout(driver, type_fn, move_fn):
 # Bot behaviors
 # ---------------------------------------------------------------------------
 
-def linear_bot(driver):
+def linear_bot(driver, skip_honeypot=False):
     """Straight-line mouse, uniform typing with slight variance."""
     _go_home(driver)
     _page_sweep(driver)
@@ -696,10 +730,10 @@ def linear_bot(driver):
         return
     _idle_fidget(driver, random.uniform(0.3, 0.8))
 
-    _fill_checkout(driver, _type_uniform, _linear_move_and_click)
+    _fill_checkout(driver, _type_uniform, _linear_move_and_click, skip_honeypot=skip_honeypot)
 
 
-def scripted_bot(driver):
+def scripted_bot(driver, skip_honeypot=False):
     """Bezier curve mouse, human-like typing, scrolling. More sophisticated."""
     _go_home(driver)
     _page_sweep(driver)
@@ -724,10 +758,10 @@ def scripted_bot(driver):
     _page_sweep(driver)
     _idle_fidget(driver, random.uniform(0.5, 1.5))
 
-    _fill_checkout(driver, _type_human, _human_move_and_click)
+    _fill_checkout(driver, _type_human, _human_move_and_click, skip_honeypot=skip_honeypot)
 
 
-def tabber_bot(driver):
+def tabber_bot(driver, skip_honeypot=False):
     """Keyboard-only bot — navigates entirely via Tab/Enter, no mouse at all.
     Easy to detect: zero mouse events, perfectly regular key timing."""
     _go_home(driver)
@@ -769,10 +803,10 @@ def tabber_bot(driver):
             return
 
     time.sleep(random.uniform(0.5, 1.0))
-    _fill_checkout(driver, _type_uniform, _linear_move_and_click)
+    _fill_checkout(driver, _type_uniform, _linear_move_and_click, skip_honeypot=skip_honeypot)
 
 
-def slow_bot(driver):
+def slow_bot(driver, skip_honeypot=False):
     """Slow methodical bot — long pauses between actions (5-10s), very regular.
     Mimics a careful person but timing is unnaturally consistent."""
     _go_home(driver)
@@ -792,10 +826,10 @@ def slow_bot(driver):
         return
     time.sleep(random.uniform(5.0, 8.0))
 
-    _fill_checkout(driver, _type_human, _human_move_and_click)
+    _fill_checkout(driver, _type_human, _human_move_and_click, skip_honeypot=skip_honeypot)
 
 
-def erratic_bot(driver):
+def erratic_bot(driver, skip_honeypot=False):
     """Erratic bot — random mouse movements everywhere, clicks randomly,
     eventually finds the right elements. High spatial diversity but
     unnatural patterns (no purposeful movement toward targets)."""
@@ -832,10 +866,10 @@ def erratic_bot(driver):
         return
 
     # Erratic checkout — fidget excessively between fields
-    _fill_checkout(driver, _type_human, _human_move_and_click)
+    _fill_checkout(driver, _type_human, _human_move_and_click, skip_honeypot=skip_honeypot)
 
 
-def speedrun_bot(driver):
+def speedrun_bot(driver, skip_honeypot=False):
     """Speed-run bot — completes the entire flow as fast as possible.
     Minimal mouse movement, instant typing, near-zero pauses.
     Very easy to detect: session duration is unnaturally short."""
@@ -881,6 +915,8 @@ def speedrun_bot(driver):
                 continue
             value = known_values.get(field_id)
             if value is None:
+                if skip_honeypot:
+                    continue
                 value = GENERIC_FILLERS[filler_idx % len(GENERIC_FILLERS)]
                 filler_idx += 1
             if not value:
@@ -924,7 +960,7 @@ def speedrun_bot(driver):
         _handle_challenge(driver, _linear_move_and_click)
 
 
-def replay_bot(driver, source_path: str):
+def replay_bot(driver, source_path: str, skip_honeypot=False):
     """Replay recorded human mouse/scroll patterns with noise, then complete flow."""
     segments = _load_replay_segments(source_path)
     if not segments:
@@ -960,7 +996,7 @@ def replay_bot(driver, source_path: str):
     _replay_scroll(driver, seg.get("scroll", []), max_events=5)
     time.sleep(random.uniform(0.2, 0.5))
 
-    _fill_checkout(driver, _type_human, _human_move_and_click)
+    _fill_checkout(driver, _type_human, _human_move_and_click, skip_honeypot=skip_honeypot)
 
 
 # ---------------------------------------------------------------------------
@@ -1111,7 +1147,7 @@ def _export_and_confirm(driver, run_index: int) -> None:
 
     # Save JSON
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S-%f")
     filename = f"telemetry_export_{ts}_selenium_run{run_index}.json"
     out_path = DATA_DIR / filename
 
@@ -1162,6 +1198,7 @@ def main():
     parser.add_argument("--type", choices=["linear", "scripted", "replay", "tabber", "slow", "erratic", "speedrun", "mixed"], default="scripted")
     parser.add_argument("--replay-source", type=str, help="JSON file for replay bot")
     parser.add_argument("--pause-between", type=float, default=2.0, help="Seconds between runs")
+    parser.add_argument("--skip-honeypot", action="store_true", help="Skip unknown form fields (avoids honeypot traps)")
     args = parser.parse_args()
 
     print(f"Selenium Bot — {args.runs} {args.type} runs")
@@ -1185,23 +1222,24 @@ def main():
                     bot_type = random.choice(["linear", "scripted", "tabber", "slow", "erratic", "speedrun"])
                     print(f"  Mixed mode → {bot_type}")
 
+                skip = args.skip_honeypot
                 if bot_type == "linear":
-                    linear_bot(driver)
+                    linear_bot(driver, skip_honeypot=skip)
                 elif bot_type == "scripted":
-                    scripted_bot(driver)
+                    scripted_bot(driver, skip_honeypot=skip)
                 elif bot_type == "replay":
                     if not args.replay_source:
                         print("Error: --replay-source required for replay bot")
                         return
-                    replay_bot(driver, args.replay_source)
+                    replay_bot(driver, args.replay_source, skip_honeypot=skip)
                 elif bot_type == "tabber":
-                    tabber_bot(driver)
+                    tabber_bot(driver, skip_honeypot=skip)
                 elif bot_type == "slow":
-                    slow_bot(driver)
+                    slow_bot(driver, skip_honeypot=skip)
                 elif bot_type == "erratic":
-                    erratic_bot(driver)
+                    erratic_bot(driver, skip_honeypot=skip)
                 elif bot_type == "speedrun":
-                    speedrun_bot(driver)
+                    speedrun_bot(driver, skip_honeypot=skip)
                 run_succeeded = True
                 print(f"  Run {i + 1} complete.")
             except Exception as e:
@@ -1222,7 +1260,8 @@ def main():
         print("All runs complete!")
         print(f"Telemetry saved to: {DATA_DIR}")
         print("="*50)
-        input("Press Enter to close the browser...")
+        if sys.stdin.isatty():
+            input("Press Enter to close the browser...")
 
     finally:
         driver.quit()

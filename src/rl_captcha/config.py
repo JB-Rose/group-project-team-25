@@ -94,7 +94,7 @@ class EventEnvConfig:
 
     # Session limits
     min_events: int = 10              # skip sessions with fewer events
-    max_windows: int = 50             # cap windows per episode (subsample if longer)
+    max_windows: int = 256            # cap windows per episode (subsample if longer)
 
     # Action costs (higher = worse UX friction for users)
     action_costs: list[float] = field(

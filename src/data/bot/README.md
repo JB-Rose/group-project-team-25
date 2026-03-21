@@ -12,7 +12,7 @@ Automated bot browsing sessions. Treated as **label=0 (bot)** by the training pi
 python bots/selenium_bot.py --runs 5 --type scripted
 ```
 
-The bot auto-exports telemetry from the backend API after each run and saves JSON files here automatically. No Chrome extension needed — `tracking.js` captures everything.
+The bot auto-exports telemetry from the backend API after each run and saves JSON files here automatically. No Chrome extension is required for the Selenium bot because `tracking.js` captures everything.
 
 ### LLM Bot
 
@@ -44,7 +44,11 @@ Files from the Chrome extension use the same format as human data — session ob
 }
 ```
 
-For training, all segments within a session are merged into flat event lists, then grouped into 30-event windows for the windowed observation encoder.
+For training, all segments within a session are merged into flat event lists, then grouped into 30-event windows for the windowed observation encoder and capped by the current `max_windows` setting.
+
+## Current Status
+
+The previous collected dataset was intentionally cleared after telemetry and bot-behavior changes. Recollect fresh bot sessions before retraining.
 
 ## Usage
 

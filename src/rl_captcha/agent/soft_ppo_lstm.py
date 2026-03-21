@@ -231,6 +231,11 @@ class SoftPPOLSTM(PPOLSTM):
         alpha_path = path / "soft_ppo_alpha.pt"
         if alpha_path.exists():
             ckpt = torch.load(alpha_path, map_location=self.device, weights_only=False)
-            self.log_alpha.data.copy_(ckpt["log_alpha"])
+            self.log_alpha.data.copy_(ckpt["log_alpha"].to(self.device))
             self.alpha_optimizer.load_state_dict(ckpt["alpha_optimizer"])
+            # Move optimizer state tensors to correct device
+            for state in self.alpha_optimizer.state.values():
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor):
+                        state[k] = v.to(self.device)
             self.target_entropy = ckpt.get("target_entropy", self.target_entropy)

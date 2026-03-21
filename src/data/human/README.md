@@ -20,7 +20,7 @@ Real human browsing sessions. Treated as **label=1 (human)** by the training pip
 2. Call `POST /api/agent/confirm` with `{ "session_id": "...", "true_label": 1 }`
 3. Sessions are auto-saved here as `session_<uuid>.json`
 
-Bot scripts call this endpoint automatically after each run. Sessions are saved and the agent does an online PPO update.
+Bot scripts call this endpoint automatically after each run. Human confirmations save here and the agent does an online update.
 
 ## JSON Formats
 
@@ -43,7 +43,7 @@ One or more sessions keyed by session UUID:
         "url": "http://localhost:3000/",
         "mouse": [{ "x": 100, "y": 200, "t": 1234.5 }],
         "clicks": [{ "t": 1234.5, "x": 100, "y": 200, "button": "left", "dt_since_last": 500 }],
-        "keystrokes": [{ "field": "card_number", "type": "down", "t": 1234.5, "key": null }],
+        "keystrokes": [{ "field": "card_number", "type": "down", "t": 1234.5 }],
         "scroll": [{ "t": 1234.5, "scrollX": 0, "scrollY": 500, "dy": 100 }]
       }
     ]
@@ -69,7 +69,11 @@ Single session with segments at the top level:
 }
 ```
 
-Segments are split by idle gaps (3+ seconds of inactivity). For training, all segments within a session are merged into flat event lists, then grouped into 30-event windows for the windowed observation encoder.
+Segments are split by idle gaps (3+ seconds of inactivity). For training, all segments within a session are merged into flat event lists, grouped into 30-event windows, and capped by the current `max_windows` setting.
+
+## Current Status
+
+The previous collected dataset was intentionally cleared after telemetry-capture changes. Recollect fresh human sessions before retraining.
 
 ## Usage
 

@@ -106,11 +106,10 @@ Open **http://localhost:3000** in your browser. Vite proxies `/api/*` requests t
 1. **Home** (`/`) — Browse concerts and select one
 2. **Seat Selection** (`/seats/:id`) — Pick seats from an interactive layout
 3. **Checkout** (`/checkout`) — Fill the payment form
-   - Rolling inference polls every 3 seconds; deploys a honeypot if suspicious
-   - On "Purchase": telemetry is force-flushed and the agent evaluates the full session
+   - Rolling inference polls every 3 seconds and can request honeypot deployment
+   - On "Purchase": telemetry is force-flushed and the agent evaluates the full session through `/api/agent/evaluate`
+   - Policy outputs map directly to `allow`, `block`, or `easy/medium/hard` puzzle
    - Honeypot triggered → instant hard puzzle
-   - High bot probability → scaled puzzle (easy/medium/hard based on confidence)
-   - Low suspicion → checkout proceeds
 4. **Confirmation** (`/confirmation`) — Order confirmed, session sent for online RL update
 
 ## Dev Dashboard
@@ -146,14 +145,14 @@ The Chrome extension captures raw user-interaction telemetry (mouse, clicks, key
 
 | Signal | Sample Rate | Data Captured |
 |--------|-------------|---------------|
-| Mouse movement | ~66 Hz (15 ms) | Client X/Y, page X/Y, timestamp |
+| Mouse movement | sampled after real movement | Client X/Y, page X/Y, timestamp |
 | Clicks | Every click | Position, button, target element info, time delta |
 | Keystrokes | Every key | Field ID, down/up, timestamp, special keys only (NO characters/passwords) |
 | Scroll | ~20 Hz (50 ms) | X/Y position, delta, timestamp |
 | Client hints | Once per page | Screen size, timezone, language, device memory, user agent |
 | Network meta | Once per page | Connection type, bandwidth, RTT, page load timings |
 
-Data is segmented around 3+ second idle gaps for temporal coherence.
+Data is segmented around 3+ second idle gaps for temporal coherence. Stationary cursors do not continuously emit duplicate mouse points anymore.
 
 ---
 
@@ -188,11 +187,11 @@ Three behavior profiles that produce progressively harder-to-detect bot data:
 
 | Profile | Mouse Movement | Typing | Scrolling | Detection Difficulty |
 |---------|---------------|--------|-----------|---------------------|
-| `linear` | Straight-line + idle fidgeting | Uniform 20 ms intervals | None | Easy |
-| `scripted` | Bezier curves + idle fidgeting | Variable timing, burst typing, thinking pauses | Momentum-based random scrolls | Medium |
+| `linear` | Straight-line + light idle fidgeting | Uniform 20 ms intervals | None | Easy |
+| `scripted` | Bezier curves + light idle fidgeting | Variable timing, burst typing, thinking pauses | Momentum-based random scrolls | Medium |
 | `replay` | Replays recorded human mouse data + Gaussian noise | Uniform-ish | Replayed from source with variance | Hard |
 
-All bot types include **idle fidgeting** between actions -- small drifts, jitter, and micro-movements that prevent zero mouse variance during idle periods.
+All bot types include small idle movements between actions, but these are intentionally limited so bot traces do not dwarf human checkout sessions.
 
 #### Commands
 
@@ -307,7 +306,7 @@ python bots/llm_bot.py --runs 4 --inject-events
 #### How It Works (Step-by-Step)
 
 1. Opens a visible Chrome window (not headless) with `disable_security=True`
-2. Optionally injects a DOM event-generation script via CDP that patches `element.click()`, `element.focus()`, `scrollTo/scrollBy`, and input events into real browser events — so `tracking.js` captures full telemetry even from programmatic actions
+2. Optionally injects a DOM event-generation script via CDP that patches `element.click()`, `element.focus()`, `scrollTo/scrollBy`, and input events into real browser events — so `tracking.js` captures telemetry even from programmatic actions
 3. The LLM autonomously navigates: browses concerts → selects seats → fills checkout → purchases
 4. After each run, the script waits 8 seconds for `tracking.js` to flush, then:
    - Reads `tm_session_id` from the browser's sessionStorage via CDP
@@ -315,7 +314,7 @@ python bots/llm_bot.py --runs 4 --inject-events
    - Pulls raw telemetry from `/api/session/raw/<sid>`
    - Saves the JSON to `data/bot/` with a UTC timestamp filename
    - Confirms the session as a bot (`true_label=0`) via `/api/agent/confirm`
-5. When `--inject-events` is enabled, even-numbered runs get injection and odd runs don't, creating data diversity (sparse vs. rich telemetry)
+5. When `--inject-events` is enabled, even-numbered runs get injection and odd runs do not, creating data diversity (sparse vs. richer telemetry)
 
 #### LLM Models Used
 
@@ -359,6 +358,8 @@ Each file contains the raw telemetry arrays (mouse movements, clicks, keystrokes
 ## Training the RL Agent
 
 Training data lives in `data/human/` (label=1) and `data/bot/` (label=0).
+
+Because telemetry capture semantics changed, recollect fresh data before training a new model. The previous JSON dataset was intentionally cleared.
 
 ### 1. Collect Data
 

@@ -23,11 +23,11 @@ Three behavior profiles for generating diverse bot data:
 
 | Type | Mouse | Typing | Scrolls | Detection Difficulty |
 |------|-------|--------|---------|---------------------|
-| `linear` | Straight-line + idle fidgeting | Uniform 20ms intervals | None | Easy |
-| `scripted` | Bezier curves + idle fidgeting | Varied timing, burst typing | Human-like momentum scrolls | Medium |
+| `linear` | Straight-line + light idle fidgeting | Uniform 20ms intervals | None | Easy |
+| `scripted` | Bezier curves + light idle fidgeting | Varied timing, burst typing | Human-like momentum scrolls | Medium |
 | `replay` | Replays recorded human mouse data + noise | Uniform-ish | Replayed from source | Hard |
 
-All bot types include **idle fidgeting** between actions -- small drifts, jitter, and micro-movements that simulate a human hand resting on the mouse. This prevents the telemetry from having zero mouse variance during idle periods (a trivially detectable bot signal).
+All bot types include small idle movements between actions, but these are intentionally limited so bot sessions stay closer to real checkout flows.
 
 ### Commands
 
@@ -65,7 +65,7 @@ python bots/selenium_bot.py --runs 3 --type replay \
 
 ## LLM Bot
 
-Uses [browser-use](https://github.com/browser-use/browser-use) to give an LLM (Claude or GPT-4) autonomous control of Chrome. The LLM reads the page, decides where to click, what to type, and completes the booking flow on its own -- producing the most realistic bot behavior.
+Uses [browser-use](https://github.com/browser-use/browser-use) to give an LLM (Claude or GPT-4o) autonomous control of Chrome. The LLM reads the page, decides where to click, what to type, and completes the booking flow on its own.
 
 ### Setup
 
@@ -108,3 +108,9 @@ python bots/llm_bot.py --task "Go to localhost:3000, browse concerts, pick the c
 2. The LLM autonomously navigates: browses concerts, selects seats, fills checkout
 3. `tracking.js` captures all telemetry in the background
 4. After each run, auto-exports telemetry to `data/bot/` and confirms as bot
+
+## Current Collection Notes
+
+- Selenium bots still generate intentional mouse movement and pauses, but the movement inflation was reduced.
+- The optional LLM event injector no longer emits a continuous background mousemove loop; it now adds small movement bursts around focus and click actions only.
+- Because telemetry semantics changed, recollect fresh bot data before retraining.
