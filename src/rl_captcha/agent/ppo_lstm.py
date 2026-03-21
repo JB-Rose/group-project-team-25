@@ -261,6 +261,7 @@ class PPOLSTM:
         path = Path(path)
         checkpoint = torch.load(
             path / "ppo_lstm_checkpoint.pt", map_location=self.device,
+            weights_only=False,
         )
 
         # Restore config if saved (prevents size mismatches from default changes)

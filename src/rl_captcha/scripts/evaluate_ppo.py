@@ -1,9 +1,16 @@
-"""Evaluate a trained PPO+LSTM agent on the event-level CAPTCHA environment.
+"""Evaluate one or more trained PPO/DG/Soft-PPO+LSTM agents on the event-level CAPTCHA environment.
 
-Usage:
+Usage (single agent):
     python -m rl_captcha.scripts.evaluate_ppo \
         --agent rl_captcha/agent/checkpoints/ppo_run1 \
         --data-dir data/ \
+        --episodes 500
+
+Usage (all three at once):
+    python -m rl_captcha.scripts.evaluate_ppo \
+        --agent ppo=rl_captcha/agent/checkpoints/ppo_run1 \
+               dg=rl_captcha/agent/checkpoints/dg_run1 \
+               soft_ppo=rl_captcha/agent/checkpoints/soft_ppo_run1 \
         --episodes 500
 
 By default, evaluation uses the held-out TEST split (15% of data) with
@@ -21,16 +28,19 @@ from rl_captcha.config import Config
 from rl_captcha.data.loader import load_from_directory, split_sessions
 from rl_captcha.environment.event_env import EventEnv, ACTION_NAMES
 from rl_captcha.agent.ppo_lstm import PPOLSTM
+from rl_captcha.agent.dg_lstm import DGLSTM, DGConfig
+from rl_captcha.agent.soft_ppo_lstm import SoftPPOLSTM, SoftPPOConfig
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Evaluate PPO+LSTM agent")
-    p.add_argument("--agent", type=str, required=True,
-                    help="Path to agent checkpoint directory")
+    p = argparse.ArgumentParser(description="Evaluate PPO/DG/Soft-PPO+LSTM agents")
+    p.add_argument("--agent", type=str, nargs="+", required=True,
+                    help="Agent checkpoint(s). Either plain paths or name=path pairs "
+                         "(e.g. ppo=checkpoints/ppo_run1 dg=checkpoints/dg_run1)")
     p.add_argument("--data-dir", type=str, default="data/",
                     help="Path to data directory with human/ and bot/ subdirs")
     p.add_argument("--episodes", type=int, default=500,
-                    help="Number of episodes to evaluate")
+                    help="Number of episodes to evaluate per agent")
     p.add_argument("--split", type=str, default="test",
                     choices=["test", "val", "train", "all"],
                     help="Which data split to evaluate on (default: test)")
@@ -38,6 +48,38 @@ def parse_args() -> argparse.Namespace:
                     help="Random seed for split (must match training)")
     p.add_argument("--device", type=str, default="auto")
     return p.parse_args()
+
+
+def _parse_agent_specs(agent_args: list[str]) -> list[tuple[str, str]]:
+    """Parse agent arguments into (name, path) pairs.
+
+    Supports:
+        --agent path/to/checkpoint              → name inferred from dir name
+        --agent ppo=path/to/ppo dg=path/to/dg   → explicit names
+    """
+    specs = []
+    for arg in agent_args:
+        if "=" in arg:
+            name, path = arg.split("=", 1)
+            specs.append((name.strip(), path.strip()))
+        else:
+            # Infer name from last directory component
+            from pathlib import Path
+            name = Path(arg).name
+            specs.append((name, arg))
+    return specs
+
+
+def _create_agent(name: str, cfg: Config, device: str) -> PPOLSTM:
+    """Instantiate the correct agent class based on the agent name."""
+    kwargs = dict(obs_dim=cfg.event_env.event_dim, action_dim=7, device=device)
+    algo = name.lower()
+    if algo == "dg":
+        return DGLSTM(config=DGConfig(), **kwargs)
+    elif algo == "soft_ppo":
+        return SoftPPOLSTM(config=SoftPPOConfig(), **kwargs)
+    else:
+        return PPOLSTM(config=cfg.ppo, **kwargs)
 
 
 def main():
@@ -70,33 +112,68 @@ def main():
         print(f"  Evaluating on {args.split.upper()} split: "
               f"{len(eval_sessions)} sessions ({h} human, {b} bot)")
 
-    # Create environment and agent
-    env = EventEnv(eval_sessions, config=cfg.event_env)
-    agent = PPOLSTM(
-        obs_dim=cfg.event_env.event_dim,
-        action_dim=7,
-        config=cfg.ppo,
-        device=args.device,
-    )
-    agent.load(args.agent)
-    print(f"  Loaded agent from {args.agent}")
-    print(f"  Device: {agent.device}")
+    # Create environment (shared across all agents — same eval data)
+    from dataclasses import replace
+    eval_cfg = replace(cfg.event_env, augment=False)
+    env = EventEnv(eval_sessions, config=eval_cfg)
+
+    # Parse agent specs
+    agent_specs = _parse_agent_specs(args.agent)
+    print(f"\n  Evaluating {len(agent_specs)} agent(s): "
+          f"{', '.join(name for name, _ in agent_specs)}")
+    print(f"  Episodes per agent: {args.episodes}")
     print()
 
-    # Run evaluation
-    results = _run_evaluation(env, agent, args.episodes)
-    _print_results(results, split_name=args.split)
+    # Evaluate each agent
+    all_results = {}
+    for name, path in agent_specs:
+        print(f"{'=' * 60}")
+        print(f"  Loading agent: {name} ({path})")
+        agent = _create_agent(name, cfg, args.device)
+        agent.load(path)
+        print(f"  Device: {agent.device}")
+        print()
+
+        results = _run_evaluation(env, agent, args.episodes, agent_name=name)
+        all_results[name] = results
+        _print_results(results, agent_name=name, split_name=args.split)
+
+    # Print comparison table if multiple agents
+    if len(all_results) > 1:
+        _print_comparison(all_results, split_name=args.split)
 
 
 def _run_evaluation(
     env: EventEnv,
     agent: PPOLSTM,
     num_episodes: int,
+    agent_name: str = "",
+    eval_seed: int = 42,
 ) -> dict:
-    """Run deterministic evaluation episodes."""
+    """Run deterministic evaluation episodes.
+
+    Seeds the RNG before each run so every agent sees the exact same
+    sequence of sessions, making results reproducible and comparable.
+    """
+    import random as _random
+    import sys
+    import time
+
+    _random.seed(eval_seed)
     episode_data = []
+    t_start = time.time()
 
     for ep in range(num_episodes):
+        if (ep + 1) % 10 == 0 or ep == 0:
+            elapsed = time.time() - t_start
+            eps_per_sec = (ep + 1) / elapsed if elapsed > 0 else 0
+            eta = (num_episodes - ep - 1) / eps_per_sec if eps_per_sec > 0 else 0
+            sys.stdout.write(
+                f"\r  [{agent_name}] Episode {ep + 1}/{num_episodes} "
+                f"({eps_per_sec:.1f} ep/s, ETA {eta:.0f}s)"
+            )
+            sys.stdout.flush()
+
         obs, info = env.reset()
         agent.reset_hidden()
 
@@ -132,23 +209,21 @@ def _run_evaluation(
             "final_action": actions_taken[-1] if actions_taken else -1,
         })
 
+    elapsed = time.time() - t_start
+    sys.stdout.write(
+        f"\r  [{agent_name}] Done: {num_episodes} episodes in {elapsed:.1f}s "
+        f"({num_episodes / elapsed:.1f} ep/s)      \n"
+    )
+    sys.stdout.flush()
     return {"episodes": episode_data}
 
 
-def _print_results(results: dict, split_name: str = "test"):
-    """Print evaluation summary."""
-    episodes = results["episodes"]
+def _compute_metrics(episodes: list[dict]) -> dict:
+    """Compute evaluation metrics from episode data."""
     n = len(episodes)
-
     rewards = [e["reward"] for e in episodes]
     lengths = [e["steps"] for e in episodes]
 
-    print(f"=== Evaluation Results — {split_name.upper()} split ({n} episodes) ===")
-    print(f"  Avg reward:  {np.mean(rewards):.3f} +/- {np.std(rewards):.3f}")
-    print(f"  Avg length:  {np.mean(lengths):.1f} +/- {np.std(lengths):.1f}")
-    print()
-
-    # Confusion matrix
     tp = sum(1 for e in episodes if e["true_label"] == 0 and e["outcome"] in
              ("correct_block", "bot_blocked_puzzle"))
     tn = sum(1 for e in episodes if e["true_label"] == 1 and e["outcome"] == "correct_allow")
@@ -157,27 +232,51 @@ def _print_results(results: dict, split_name: str = "test"):
     fn = sum(1 for e in episodes if e["true_label"] == 0 and e["outcome"] in
              ("false_negative", "bot_passed_puzzle"))
     truncated = sum(1 for e in episodes if e["outcome"] == "truncated")
-    other = n - tp - tn - fp - fn - truncated
-
-    print("--- Confusion Matrix ---")
-    print(f"  True Positives  (bot blocked):   {tp:4d} ({100*tp/n:.1f}%)")
-    print(f"  True Negatives  (human allowed): {tn:4d} ({100*tn/n:.1f}%)")
-    print(f"  False Positives (human blocked): {fp:4d} ({100*fp/n:.1f}%)")
-    print(f"  False Negatives (bot allowed):   {fn:4d} ({100*fn/n:.1f}%)")
-    print(f"  Truncated (indecisive):          {truncated:4d} ({100*truncated/n:.1f}%)")
-    if other > 0:
-        print(f"  Other:                           {other:4d} ({100*other/n:.1f}%)")
-    print()
 
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
     accuracy = (tp + tn) / n if n > 0 else 0.0
 
-    print(f"  Accuracy:  {accuracy:.3f}")
-    print(f"  Precision: {precision:.3f}")
-    print(f"  Recall:    {recall:.3f}")
-    print(f"  F1:        {f1:.3f}")
+    return {
+        "avg_reward": float(np.mean(rewards)),
+        "std_reward": float(np.std(rewards)),
+        "avg_length": float(np.mean(lengths)),
+        "tp": tp, "tn": tn, "fp": fp, "fn": fn, "truncated": truncated,
+        "accuracy": accuracy,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+    }
+
+
+def _print_results(results: dict, agent_name: str = "agent", split_name: str = "test"):
+    """Print evaluation summary for one agent."""
+    episodes = results["episodes"]
+    n = len(episodes)
+    m = _compute_metrics(episodes)
+
+    print(f"=== {agent_name.upper()} - {split_name.upper()} split ({n} episodes) ===")
+    print(f"  Avg reward:  {m['avg_reward']:.3f} +/- {m['std_reward']:.3f}")
+    print(f"  Avg length:  {m['avg_length']:.1f}")
+    print()
+
+    # Confusion matrix
+    print("--- Confusion Matrix ---")
+    print(f"  True Positives  (bot blocked):   {m['tp']:4d} ({100*m['tp']/n:.1f}%)")
+    print(f"  True Negatives  (human allowed): {m['tn']:4d} ({100*m['tn']/n:.1f}%)")
+    print(f"  False Positives (human blocked): {m['fp']:4d} ({100*m['fp']/n:.1f}%)")
+    print(f"  False Negatives (bot allowed):   {m['fn']:4d} ({100*m['fn']/n:.1f}%)")
+    print(f"  Truncated (indecisive):          {m['truncated']:4d} ({100*m['truncated']/n:.1f}%)")
+    other = n - m['tp'] - m['tn'] - m['fp'] - m['fn'] - m['truncated']
+    if other > 0:
+        print(f"  Other:                           {other:4d} ({100*other/n:.1f}%)")
+    print()
+
+    print(f"  Accuracy:  {m['accuracy']:.3f}")
+    print(f"  Precision: {m['precision']:.3f}")
+    print(f"  Recall:    {m['recall']:.3f}")
+    print(f"  F1:        {m['f1']:.3f}")
     print()
 
     # Outcome distribution
@@ -214,6 +313,59 @@ def _print_results(results: dict, split_name: str = "test"):
     if bot_eps:
         avg_bot_steps = np.mean([e["steps"] for e in bot_eps])
         print(f"  Avg steps (bot sessions):   {avg_bot_steps:.1f}")
+    print()
+
+
+def _print_comparison(all_results: dict[str, dict], split_name: str = "test"):
+    """Print a side-by-side comparison table of all agents."""
+    print()
+    print("=" * 70)
+    print(f"  COMPARISON TABLE - {split_name.upper()} split")
+    print("=" * 70)
+
+    metrics = {}
+    for name, results in all_results.items():
+        metrics[name] = _compute_metrics(results["episodes"])
+
+    # Header
+    names = list(metrics.keys())
+    col_w = max(12, max(len(n) for n in names) + 2)
+    header = f"  {'Metric':<20s}" + "".join(f"{n:>{col_w}s}" for n in names)
+    print(header)
+    print("  " + "-" * (20 + col_w * len(names)))
+
+    # Rows
+    rows = [
+        ("Accuracy",  "accuracy",  ".3f"),
+        ("Precision",  "precision", ".3f"),
+        ("Recall",     "recall",    ".3f"),
+        ("F1",         "f1",        ".3f"),
+        ("Avg Reward", "avg_reward", ".3f"),
+        ("Avg Length", "avg_length", ".1f"),
+        ("TP (bot blocked)", "tp",  "d"),
+        ("TN (human ok)",    "tn",  "d"),
+        ("FP (human bad)",   "fp",  "d"),
+        ("FN (bot missed)",  "fn",  "d"),
+        ("Truncated",  "truncated", "d"),
+    ]
+
+    for label, key, fmt in rows:
+        row = f"  {label:<20s}"
+        for name in names:
+            val = metrics[name][key]
+            row += f"{val:>{col_w}{fmt}}"
+        print(row)
+
+    print()
+
+    # Highlight best
+    best_acc = max(names, key=lambda n: metrics[n]["accuracy"])
+    best_f1 = max(names, key=lambda n: metrics[n]["f1"])
+    best_reward = max(names, key=lambda n: metrics[n]["avg_reward"])
+    print(f"  Best accuracy: {best_acc} ({metrics[best_acc]['accuracy']:.3f})")
+    print(f"  Best F1:       {best_f1} ({metrics[best_f1]['f1']:.3f})")
+    print(f"  Best reward:   {best_reward} ({metrics[best_reward]['avg_reward']:.3f})")
+    print()
 
 
 if __name__ == "__main__":

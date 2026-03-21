@@ -6,7 +6,7 @@ Ticket Monarch is a mock web application for concert ticket booking.
 
 In this mock environment, users will browse concerts, select their seats, and checkout. During this process, the system tracks mouse moevments, clicks, keystrokes, and scrolls.
 
-At checkout, a PPO + LSTM agent will evaluate the session - resulting in a bot versus human detection output.
+At checkout, a reinforcement learning agent (PPO, DG, or Soft PPO — all LSTM-based) evaluates the session, producing a bot vs. human detection output. The algorithm is selected via the `RL_ALGORITHM` environment variable (`ppo`, `dg`, or `soft_ppo`; defaults to `ppo`).
 
 ## Project Structure
 
@@ -121,5 +121,5 @@ MySQL `ticketmonarch_db` with tables:
 
 - **Frontend**: React 18.2, Vite 5, React Router DOM 6, vanilla CSS, UUID v4
 - **Backend**: Python 3.12, Flask 3.0, Flask-CORS, mysql-connector-python
-- **Agent**: PyTorch PPO+LSTM (lazy-loaded, thread-safe with Lock)
+- **Agent**: PyTorch PPO/DG/Soft-PPO+LSTM (lazy-loaded, thread-safe with Lock, algorithm selectable via `RL_ALGORITHM` env var)
 - **Database**: MySQL 8.0+

@@ -1,6 +1,6 @@
 # RL-Based Strategies for Improving and Attacking Synthetic CAPTCHAs
 
-> A mock concert ticket-booking web app that uses a PPO+LSTM reinforcement learning agent to detect bots in real time based on raw telemetry (mouse movements, clicks, keystrokes, scrolls).
+> A mock concert ticket-booking web app that uses reinforcement learning (PPO, DG, or Soft PPO — all LSTM-based) to detect bots in real time based on raw telemetry (mouse movements, clicks, keystrokes, scrolls).
 
 ## Team
 
@@ -165,7 +165,7 @@ src/
 │   ├── backend/            # Flask API + agent inference
 │   ├── frontend/           # React + Vite SPA
 │   └── .env.example        # MySQL connection config template
-├── rl_captcha/             # PPO+LSTM agent (training & evaluation)
+├── rl_captcha/             # RL agents: PPO, DG, Soft PPO (training & evaluation)
 ├── bots/                   # Selenium & LLM bots for data collection
 ├── chrome-extension/       # Telemetry capture extension
 └── data/                   # Training data (human/ and bot/)

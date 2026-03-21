@@ -1,4 +1,4 @@
-"""Train the PPO+LSTM or DG+LSTM event-level CAPTCHA agent.
+"""Train the PPO+LSTM, DG+LSTM, or Soft-PPO+LSTM event-level CAPTCHA agent.
 
 Usage:
     python -m rl_captcha.scripts.train_ppo \
@@ -10,6 +10,12 @@ Usage:
         --algorithm dg \
         --data-dir data/ \
         --save-path rl_captcha/agent/checkpoints/dg_run1 \
+        --total-timesteps 500000
+
+    python -m rl_captcha.scripts.train_ppo \
+        --algorithm soft_ppo \
+        --data-dir data/ \
+        --save-path rl_captcha/agent/checkpoints/soft_ppo_run1 \
         --total-timesteps 500000
 """
 
@@ -27,6 +33,7 @@ from rl_captcha.data.loader import load_from_directory, split_sessions
 from rl_captcha.environment.event_env import EventEnv
 from rl_captcha.agent.ppo_lstm import PPOLSTM
 from rl_captcha.agent.dg_lstm import DGLSTM, DGConfig
+from rl_captcha.agent.soft_ppo_lstm import SoftPPOLSTM, SoftPPOConfig
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,12 +59,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fp-penalty", type=float, default=None,
                     help="Override false-positive penalty (default: -1.0)")
     p.add_argument("--algorithm", type=str, default="ppo",
-                    choices=["ppo", "dg"],
-                    help="Training algorithm: ppo or dg (default: ppo)")
+                    choices=["ppo", "dg", "soft_ppo"],
+                    help="Training algorithm: ppo, dg, or soft_ppo (default: ppo)")
     p.add_argument("--dg-temperature", type=float, default=1.0,
                     help="DG sigmoid temperature η (default: 1.0)")
     p.add_argument("--dg-blend", type=float, default=0.0,
                     help="DG-PPO blend weight: 0=pure DG, 1=pure PPO (default: 0.0)")
+    # Soft PPO arguments
+    p.add_argument("--target-entropy-ratio", type=float, default=0.5,
+                    help="Soft PPO target entropy as fraction of max entropy (default: 0.5)")
+    p.add_argument("--alpha-lr", type=float, default=3e-4,
+                    help="Soft PPO entropy temperature learning rate (default: 3e-4)")
     return p.parse_args()
 
 
@@ -121,6 +133,19 @@ def main():
             device=args.device,
         )
         print(f"  Algorithm: DG (temp={args.dg_temperature}, blend={args.dg_blend})")
+    elif args.algorithm == "soft_ppo":
+        soft_cfg = SoftPPOConfig(
+            **{k: getattr(cfg.ppo, k) for k in cfg.ppo.__dataclass_fields__},
+            target_entropy_ratio=args.target_entropy_ratio,
+            alpha_lr=args.alpha_lr,
+        )
+        agent = SoftPPOLSTM(
+            obs_dim=cfg.event_env.event_dim,
+            action_dim=7,
+            config=soft_cfg,
+            device=args.device,
+        )
+        print(f"  Algorithm: Soft PPO (target_entropy_ratio={args.target_entropy_ratio}, alpha_lr={args.alpha_lr})")
     else:
         agent = PPOLSTM(
             obs_dim=cfg.event_env.event_dim,
@@ -321,6 +346,10 @@ def _print_rollout_stats(
         if "delight_mean" in update_metrics:
             line += (f"\n  Delight: {update_metrics['delight_mean']:.4f} | "
                      f"Gate: {update_metrics['gate_mean']:.4f}")
+        if "alpha" in update_metrics:
+            line += (f"\n  Alpha: {update_metrics['alpha']:.4f} | "
+                     f"Alpha loss: {update_metrics['alpha_loss']:.4f} | "
+                     f"Target H: {update_metrics['target_entropy']:.4f}")
         print(line)
 
     # Outcome breakdown

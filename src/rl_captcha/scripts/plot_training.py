@@ -29,6 +29,9 @@ RE_LOSSES = re.compile(
 RE_OUTCOMES = re.compile(r"Outcomes:\s*(.+)")
 RE_VAL_ACC = re.compile(r"\[Val accuracy:\s*([\d.]+)\s+over\s+(\d+)\s+episodes\]")
 RE_DG_METRICS = re.compile(r"Delight:\s*([-\d.]+)\s*\|\s*Gate:\s*([-\d.]+)")
+RE_SOFT_PPO_METRICS = re.compile(
+    r"Alpha:\s*([-\d.]+)\s*\|\s*Alpha loss:\s*([-\d.]+)\s*\|\s*Target H:\s*([-\d.]+)"
+)
 
 
 def parse_log(path: str) -> list[dict]:
@@ -94,6 +97,13 @@ def parse_log(path: str) -> list[dict]:
             if m and current:
                 current["delight"] = float(m.group(1))
                 current["gate"] = float(m.group(2))
+                continue
+
+            m = RE_SOFT_PPO_METRICS.search(line)
+            if m and current:
+                current["alpha"] = float(m.group(1))
+                current["alpha_loss"] = float(m.group(2))
+                current["target_entropy"] = float(m.group(3))
                 continue
 
             m = RE_VAL_ACC.search(line)
@@ -350,8 +360,38 @@ def plot_all(rollouts: list[dict], out_dir: Path, fmt: str = "png"):
         plt.close(fig)
         print(f"  Saved dg_metrics.{fmt}")
 
+    # ── 7b. Soft PPO-specific: alpha and alpha_loss curves ──────────
+    has_soft_ppo = any("alpha" in r for r in rollouts)
+    if has_soft_ppo:
+        alpha_vals = np.array([r.get("alpha", 0) for r in rollouts])
+        alpha_loss_vals = np.array([r.get("alpha_loss", 0) for r in rollouts])
+        target_ent = rollouts[-1].get("target_entropy", 0)
+
+        fig, (ax_a, ax_al) = plt.subplots(1, 2, figsize=(12, 4))
+        fig.suptitle("Soft PPO — Adaptive Entropy Temperature", fontsize=13, fontweight="bold")
+
+        ax_a.plot(steps_k, alpha_vals, alpha=0.25, color="#e67e22", linewidth=0.8)
+        ax_a.plot(steps_k, smooth(alpha_vals, 10), color="#e67e22", linewidth=2)
+        ax_a.set_xlabel("Training Steps (×1K)")
+        ax_a.set_ylabel("α (entropy temperature)")
+        ax_a.set_title(f"Entropy Temperature α (target H={target_ent:.3f})")
+        ax_a.grid(True, alpha=0.3)
+
+        ax_al.plot(steps_k, alpha_loss_vals, alpha=0.25, color="#1abc9c", linewidth=0.8)
+        ax_al.plot(steps_k, smooth(alpha_loss_vals, 10), color="#1abc9c", linewidth=2)
+        ax_al.axhline(0, color="gray", linestyle="--", linewidth=0.5)
+        ax_al.set_xlabel("Training Steps (×1K)")
+        ax_al.set_ylabel("α Loss")
+        ax_al.set_title("α Dual Loss (>0 → entropy too high)")
+        ax_al.grid(True, alpha=0.3)
+
+        fig.tight_layout()
+        fig.savefig(out_dir / f"soft_ppo_metrics.{fmt}")
+        plt.close(fig)
+        print(f"  Saved soft_ppo_metrics.{fmt}")
+
     # ── 8. Combined 2×2 summary figure ────────────────────────────────
-    algo_name = "DG+LSTM" if has_dg else "PPO+LSTM"
+    algo_name = "Soft-PPO+LSTM" if has_soft_ppo else ("DG+LSTM" if has_dg else "PPO+LSTM")
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
     fig.suptitle(f"{algo_name} Training Summary", fontsize=15, fontweight="bold", y=0.98)
 
