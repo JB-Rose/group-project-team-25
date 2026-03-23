@@ -124,6 +124,7 @@ rl_captcha/
 
 ```bash
 pip install -r rl_captcha/requirements.txt
+mkdir -p logs figures
 ```
 
 Dependencies: PyTorch, Gymnasium, NumPy, scikit-learn, matplotlib.
@@ -158,31 +159,15 @@ python bots/llm_bot.py --runs 3 --provider anthropic
 
 Use `--algorithm` to select between `ppo`, `dg`, or `soft_ppo`:
 
-```bash
+```powershell
 # Train PPO (default)
-python -m rl_captcha.scripts.train_ppo \
-    --algorithm ppo \
-    --data-dir data/ \
-    --save-path rl_captcha/agent/checkpoints/ppo_run1 \
-    --total-timesteps 500000 \
-    2>&1 | Tee-Object -FilePath logs/ppo_training.log
+python -m rl_captcha.scripts.train_ppo --algorithm ppo --data-dir data/ --save-path rl_captcha/agent/checkpoints/ppo_run1 --total-timesteps 500000 2>&1 | Tee-Object -FilePath logs/ppo_training.log
 
 # Train DG
-python -m rl_captcha.scripts.train_ppo \
-    --algorithm dg \
-    --data-dir data/ \
-    --save-path rl_captcha/agent/checkpoints/dg_run1 \
-    --total-timesteps 500000 \
-    2>&1 | Tee-Object -FilePath logs/dg_training.log
+python -m rl_captcha.scripts.train_ppo --algorithm dg --data-dir data/ --save-path rl_captcha/agent/checkpoints/dg_run1 --total-timesteps 500000 2>&1 | Tee-Object -FilePath logs/dg_training.log
 
 # Train Soft PPO
-python -m rl_captcha.scripts.train_ppo \
-    --algorithm soft_ppo \
-    --data-dir data/ \
-    --save-path rl_captcha/agent/checkpoints/soft_ppo_run1 \
-    --total-timesteps 500000 \
-    --target-entropy-ratio 0.5 \
-    2>&1 | Tee-Object -FilePath logs/soft_ppo_training.log
+python -m rl_captcha.scripts.train_ppo --algorithm soft_ppo --data-dir data/ --save-path rl_captcha/agent/checkpoints/soft_ppo_run1 --total-timesteps 500000 --target-entropy-ratio 0.5 2>&1 | Tee-Object -FilePath logs/soft_ppo_training.log
 ```
 
 #### Training CLI Flags
@@ -207,19 +192,12 @@ python -m rl_captcha.scripts.train_ppo \
 
 Evaluate one or more checkpoints in a single run:
 
-```bash
+```powershell
 # Single agent
-python -m rl_captcha.scripts.evaluate_ppo \
-    --agent rl_captcha/agent/checkpoints/ppo_run1 \
-    --episodes 500 --split test
+python -m rl_captcha.scripts.evaluate_ppo --agent rl_captcha/agent/checkpoints/ppo_run1 --episodes 500 --split test
 
 # All three at once (prints comparison table)
-python -m rl_captcha.scripts.evaluate_ppo \
-    --agent ppo=rl_captcha/agent/checkpoints/ppo_run1 \
-            dg=rl_captcha/agent/checkpoints/dg_run1 \
-            soft_ppo=rl_captcha/agent/checkpoints/soft_ppo_run1 \
-    --episodes 500 --split test \
-    2>&1 | Tee-Object -FilePath logs/eval_all.log
+python -m rl_captcha.scripts.evaluate_ppo --agent ppo=rl_captcha/agent/checkpoints/ppo_run1 dg=rl_captcha/agent/checkpoints/dg_run1 soft_ppo=rl_captcha/agent/checkpoints/soft_ppo_run1 --episodes 500 --split test 2>&1 | Tee-Object -FilePath logs/eval_all.log
 ```
 
 Outputs per-agent confusion matrix, accuracy, precision, recall, F1, outcome distribution, action distribution, and a side-by-side comparison table when multiple agents are provided.
@@ -237,16 +215,17 @@ Outputs per-agent confusion matrix, accuracy, precision, recall, F1, outcome dis
 
 ### 4. Visualize
 
-```bash
+```powershell
 # Individual training plots (auto-detects DG/Soft PPO metrics)
 python -m rl_captcha.scripts.plot_training --log logs/ppo_training.log --out figures/ppo
 python -m rl_captcha.scripts.plot_training --log logs/dg_training.log --out figures/dg
 python -m rl_captcha.scripts.plot_training --log logs/soft_ppo_training.log --out figures/soft_ppo
 
 # Three-way comparison plots
-python -m rl_captcha.scripts.plot_comparison \
-    --logs ppo=logs/ppo_training.log dg=logs/dg_training.log soft_ppo=logs/soft_ppo_training.log \
-    --out figures/comparison
+python -m rl_captcha.scripts.plot_comparison --logs ppo=logs/ppo_training.log dg=logs/dg_training.log soft_ppo=logs/soft_ppo_training.log --out figures/comparison
+
+# Evaluation result plots (run after evaluate step)
+python -m rl_captcha.scripts.plot_eval --log logs/eval_all.log --out figures/eval
 
 # Plot online learning log
 python -m rl_captcha.scripts.plot_online --log online_training.log --out figures/

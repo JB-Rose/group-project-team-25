@@ -98,6 +98,66 @@ def wait_for_url(driver, url_contains, timeout=10):
 # Human-like typing helpers
 # ---------------------------------------------------------------------------
 
+def _type_with_hold(driver, element, text, hold_min=0.04, hold_max=0.12,
+                     gap_min=0.03, gap_max=0.25, think_prob=0.08,
+                     think_range=(0.3, 0.8)):
+    """Type with realistic key hold durations using JS keydown/keyup events.
+
+    Selenium's send_keys() fires keydown+keyup instantly (0ms hold time),
+    which makes mean_key_hold ≈ 0 — a dead giveaway.  This function dispatches
+    separate keydown and keyup events with a realistic gap between them.
+    """
+    element.click()
+    # Clear existing value via JS (element.clear() can reset React state weirdly)
+    driver.execute_script(
+        "arguments[0].value = ''; arguments[0].dispatchEvent(new Event('input', {bubbles:true}));",
+        element,
+    )
+    time.sleep(random.uniform(0.1, 0.3))
+
+    i = 0
+    while i < len(text):
+        char = text[i]
+
+        # Burst typing: sometimes type 2-3 chars quickly in a row
+        burst_len = 1
+        if random.random() < 0.3 and i + 2 < len(text):
+            burst_len = random.randint(2, 3)
+
+        for j in range(burst_len):
+            if i + j >= len(text):
+                break
+            c = text[i + j]
+            # Dispatch keydown, wait (hold), then keyup — tracking.js measures this gap
+            hold_time = random.uniform(hold_min, hold_max)
+            driver.execute_script("""
+                var el = arguments[0], key = arguments[1], holdMs = arguments[2];
+                el.dispatchEvent(new KeyboardEvent('keydown', {key: key, code: 'Key'+key.toUpperCase(), bubbles: true}));
+                // Update value to include new char (React controlled input)
+                var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                nativeSetter.call(el, el.value + key);
+                el.dispatchEvent(new Event('input', {bubbles: true}));
+            """, element, c)
+            time.sleep(hold_time)
+            driver.execute_script("""
+                var el = arguments[0], key = arguments[1];
+                el.dispatchEvent(new KeyboardEvent('keyup', {key: key, code: 'Key'+key.toUpperCase(), bubbles: true}));
+            """, element, c)
+            # Fast within burst
+            time.sleep(random.uniform(0.02, 0.06))
+
+        i += burst_len
+
+        # Inter-key delay
+        if i < len(text):
+            if random.random() < think_prob:
+                time.sleep(random.uniform(*think_range))
+            else:
+                delay = random.lognormvariate(math.log(0.08), 0.4)
+                delay = max(gap_min, min(gap_max, delay))
+                time.sleep(delay)
+
+
 def _type_human(element, text):
     """Type with human-like timing: variable inter-key delays, occasional pauses,
     and burst typing for familiar sequences (like zip codes)."""
@@ -344,6 +404,93 @@ def _page_sweep(driver):
         actions.perform()
     except Exception:
         pass
+
+
+def _wander_mouse(driver, duration=None):
+    """Continuous mouse movement across the page — simulates a human reading,
+    scanning, or just idly moving the mouse while thinking.
+
+    This is critical because humans have mean_mouse_spd ≈ 0.098 but bots are
+    at 0.004 — bots only move mouse to click elements, humans move it constantly.
+    """
+    if duration is None:
+        duration = random.uniform(0.8, 2.5)
+
+    elapsed = 0.0
+    while elapsed < duration:
+        actions = ActionChains(driver)
+        # Pick a random movement style
+        style = random.choices(["sweep", "drift", "read_scan"], weights=[0.3, 0.4, 0.3])[0]
+
+        if style == "sweep":
+            # Broad sweep across page (like scanning a section)
+            dx_total = random.randint(-300, 300)
+            dy_total = random.randint(-200, 200)
+            steps = random.randint(8, 20)
+            for s in range(steps):
+                t = (s + 1) / steps
+                # Ease-in-out
+                t_eased = t * t * (3 - 2 * t)
+                dx = int(dx_total / steps + random.gauss(0, 4))
+                dy = int(dy_total / steps + random.gauss(0, 3))
+                if dx != 0 or dy != 0:
+                    actions.move_by_offset(dx, dy)
+                pause = random.uniform(0.015, 0.04)
+                actions.pause(pause)
+                elapsed += pause
+
+        elif style == "drift":
+            # Slow aimless drift (mouse following eyes)
+            steps = random.randint(6, 15)
+            for _ in range(steps):
+                dx = int(random.gauss(0, 20))
+                dy = int(random.gauss(0, 15))
+                if dx != 0 or dy != 0:
+                    actions.move_by_offset(dx, dy)
+                pause = random.uniform(0.03, 0.08)
+                actions.pause(pause)
+                elapsed += pause
+
+        else:  # read_scan
+            # Horizontal scanning (like reading text left to right)
+            line_width = random.randint(100, 400)
+            steps = random.randint(8, 16)
+            for s in range(steps):
+                dx = int(line_width / steps + random.gauss(0, 3))
+                dy = int(random.gauss(0, 2))  # mostly horizontal
+                if dx != 0 or dy != 0:
+                    actions.move_by_offset(dx, dy)
+                pause = random.uniform(0.02, 0.05)
+                actions.pause(pause)
+                elapsed += pause
+            # Return-sweep (like going to next line)
+            actions.move_by_offset(-int(line_width * 0.8), random.randint(15, 35))
+            actions.pause(random.uniform(0.05, 0.1))
+            elapsed += 0.1
+
+        try:
+            actions.perform()
+        except Exception:
+            pass
+
+
+def _random_page_click(driver, count=1):
+    """Click on non-interactive areas of the page. Humans click randomly on
+    empty space, text, headers, etc. — not just form elements.
+
+    Bot interactive_click ratio is 0.875 vs human 0.490, meaning bots only
+    click on buttons/inputs. These random clicks dilute that ratio.
+    """
+    for _ in range(count):
+        try:
+            # Click on page body at random coordinates
+            body = driver.find_element(By.TAG_NAME, "body")
+            x_off = random.randint(-400, 400)
+            y_off = random.randint(-200, 200)
+            ActionChains(driver).move_to_element_with_offset(body, x_off, y_off).click().perform()
+            time.sleep(random.uniform(0.1, 0.3))
+        except Exception:
+            pass
 
 
 def _dispatch_wheel(driver, dy: int):
@@ -732,48 +879,53 @@ def _fill_checkout(driver, type_fn, move_fn, skip_honeypot=False):
 # ---------------------------------------------------------------------------
 
 def linear_bot(driver, skip_honeypot=False):
-    """Straight-line mouse, uniform typing with slight variance."""
+    """Straight-line mouse, uniform typing with slight variance.
+    Obviously robotic — easy negative for the RL agent."""
     _go_home(driver)
-    _page_sweep(driver)
-    _idle_fidget(driver, random.uniform(0.5, 1.5))
     _random_scroll(driver, scrolls=random.randint(1, 2))
+    time.sleep(random.uniform(0.3, 0.8))
 
     if not _pick_concert(driver, _linear_move_and_click):
         return
-    _page_sweep(driver)
-    _idle_fidget(driver, random.uniform(0.3, 1.0))
+    _random_scroll(driver, scrolls=1)
+    time.sleep(random.uniform(0.3, 0.5))
 
     if not _pick_section(driver, _linear_move_and_click):
         return
-    _idle_fidget(driver, random.uniform(0.3, 0.8))
+    time.sleep(random.uniform(0.2, 0.5))
 
     return _fill_checkout(driver, _type_uniform, _linear_move_and_click, skip_honeypot=skip_honeypot)
 
 
 def scripted_bot(driver, skip_honeypot=False):
-    """Bezier curve mouse, human-like typing, scrolling. More sophisticated."""
+    """Bezier curve mouse, human-like typing with key hold, scrolling. More sophisticated."""
     _go_home(driver)
-    _page_sweep(driver)
-    _idle_fidget(driver, random.uniform(1.0, 3.0))
+    _wander_mouse(driver, random.uniform(0.8, 1.5))
+    _random_page_click(driver, random.randint(0, 1))
 
     # Browse around first
-    _human_scroll(driver, scrolls=random.randint(1, 3))
-    _page_sweep(driver)
+    _human_scroll(driver, scrolls=random.randint(2, 4))
     _idle_fidget(driver, random.uniform(0.5, 1.5))
 
     if not _pick_concert(driver, _human_move_and_click):
         return
-    _page_sweep(driver)
-    _idle_fidget(driver, random.uniform(0.8, 2.0))
+    _wander_mouse(driver, random.uniform(0.5, 1.0))
+    _random_page_click(driver, random.randint(0, 1))
 
     # Look at seats
-    _human_scroll(driver, scrolls=random.randint(1, 2))
+    _human_scroll(driver, scrolls=random.randint(1, 3))
     _idle_fidget(driver, random.uniform(0.5, 1.0))
 
     if not _pick_section(driver, _human_move_and_click):
         return
-    _page_sweep(driver)
-    _idle_fidget(driver, random.uniform(0.5, 1.5))
+    _wander_mouse(driver, random.uniform(0.3, 0.8))
+    _human_scroll(driver, scrolls=1)
+
+    # Use key-hold typing for ~50% of scripted bots
+    if random.random() < 0.5:
+        def _type_scripted(element, text):
+            _type_with_hold(driver, element, text)
+        return _fill_checkout(driver, _type_scripted, _human_move_and_click, skip_honeypot=skip_honeypot)
 
     return _fill_checkout(driver, _type_human, _human_move_and_click, skip_honeypot=skip_honeypot)
 
@@ -1120,7 +1272,8 @@ def stealth_bot(driver, skip_honeypot=False):
     """Stealth bot — designed to mimic real human behavior using timing
     profiles extracted from actual human sessions in data/human/.
 
-    Uses human mouse timing, keystroke rhythm, scroll patterns, and
+    Uses realistic key hold times (JS keydown/keyup), continuous mouse
+    wandering, non-interactive page clicks, human scroll patterns, and
     natural fidgeting/browsing behavior. Hardest bot type to detect.
     """
     # Load human timing profiles
@@ -1133,7 +1286,6 @@ def stealth_bot(driver, skip_honeypot=False):
         print("  WARNING: No human data in data/human/, using synthetic timing")
 
     key_intervals = profile["key_intervals"] if profile else []
-    scroll_deltas = profile["scroll_deltas"] if profile else []
 
     # Randomly pick a persona: 60% quick decisive, 40% indecisive browser
     indecisive = random.random() < 0.4
@@ -1145,31 +1297,29 @@ def stealth_bot(driver, skip_honeypot=False):
     # --- Page 1: Home ---
     _go_home(driver)
 
-    _page_sweep(driver)
-    _idle_fidget(driver, random.uniform(0.5, 1.2))
-
-    _human_scroll(driver, scrolls=random.randint(1, 2))
+    # Continuous mouse movement while browsing (critical for mouse_spd/accel)
+    _wander_mouse(driver, random.uniform(1.0, 2.0))
+    _random_page_click(driver, random.randint(1, 2))
+    _human_scroll(driver, scrolls=random.randint(2, 4))
     _idle_fidget(driver, random.uniform(0.3, 0.8))
 
     if indecisive:
-        # Scroll back up, look around more
-        _human_scroll(driver, scrolls=1)
+        _wander_mouse(driver, random.uniform(0.8, 1.5))
+        _human_scroll(driver, scrolls=random.randint(1, 2))
+        _random_page_click(driver, 1)
         _idle_fidget(driver, random.uniform(0.5, 1.5))
-        _page_sweep(driver)
-        _idle_fidget(driver, random.uniform(0.8, 2.0))
 
     if not _pick_concert(driver, _human_move_and_click):
         return
 
     # --- Page 2: Seat Selection ---
-    _idle_fidget(driver, random.uniform(0.4, 1.0))
-    _human_scroll(driver, scrolls=1)
+    _wander_mouse(driver, random.uniform(0.8, 1.5))
+    _human_scroll(driver, scrolls=random.randint(1, 3))
+    _random_page_click(driver, random.randint(0, 2))
     _idle_fidget(driver, random.uniform(0.3, 0.8))
 
     if indecisive:
-        # Browse sections more, scroll around
-        _page_sweep(driver)
-        _idle_fidget(driver, random.uniform(0.5, 1.5))
+        _wander_mouse(driver, random.uniform(0.5, 1.2))
         _human_scroll(driver, scrolls=1)
         _idle_fidget(driver, random.uniform(0.3, 1.0))
 
@@ -1177,58 +1327,35 @@ def stealth_bot(driver, skip_honeypot=False):
         return
 
     # --- Page 3: Checkout ---
-    _idle_fidget(driver, random.uniform(0.3, 0.8))
-
-    if random.random() < 0.5:
-        _human_scroll(driver, scrolls=1)
+    _wander_mouse(driver, random.uniform(0.5, 1.2))
+    _human_scroll(driver, scrolls=random.randint(1, 2))
 
     if indecisive:
-        # Read the form first before filling
-        _page_sweep(driver)
-        _idle_fidget(driver, random.uniform(0.5, 1.2))
+        _random_page_click(driver, 1)
+        _wander_mouse(driver, random.uniform(0.5, 1.0))
 
-    # Typing speed varies by persona
+    # Typing with realistic key hold durations (JS keydown/sleep/keyup)
     think_prob = 0.12 if indecisive else 0.06
-    think_min = 0.3 if indecisive else 0.2
-    think_max = 0.8 if indecisive else 0.5
-    key_fallback_min = 80 if indecisive else 60
-    key_fallback_max = 350 if indecisive else 200
+    think_range = (0.3, 0.8) if indecisive else (0.2, 0.5)
+    hold_min = 0.05 if indecisive else 0.04
+    hold_max = 0.14 if indecisive else 0.10
 
     def _type_stealth(element, text):
-        """Type using timing sampled from real human keystroke data."""
-        element.clear()
-        time.sleep(random.uniform(0.1, 0.3))
-
-        i = 0
-        while i < len(text):
-            # Burst typing (30% chance, like real humans)
-            burst_len = 1
-            if random.random() < 0.3 and i + 2 < len(text):
-                burst_len = random.randint(2, 3)
-
-            for j in range(burst_len):
-                if i + j >= len(text):
-                    break
-                element.send_keys(text[i + j])
-                time.sleep(random.uniform(0.02, 0.06))
-
-            i += burst_len
-
-            if i < len(text):
-                if random.random() < think_prob:
-                    time.sleep(random.uniform(think_min, think_max))
-                else:
-                    delay = _sample_from_human(key_intervals,
-                                               key_fallback_min, key_fallback_max)
-                    time.sleep(delay)
+        """Type with realistic key hold times using JS events."""
+        _type_with_hold(driver, element, text,
+                        hold_min=hold_min, hold_max=hold_max,
+                        think_prob=think_prob, think_range=think_range)
 
     fidget_prob = 0.5 if indecisive else 0.3
 
-    def _stealth_move_and_click(driver, element, click_only=False):
-        """Move to element with occasional fidgeting before click."""
+    def _stealth_move_and_click(driver_arg, element, click_only=False):
+        """Move to element with mouse wandering and occasional fidgeting."""
+        # Sometimes wander mouse before clicking (reading nearby text)
+        if random.random() < 0.3:
+            _wander_mouse(driver_arg, random.uniform(0.3, 0.8))
         if random.random() < fidget_prob:
-            _idle_fidget(driver, random.uniform(0.1, 0.3))
-        _human_move_and_click(driver, element, click_only=click_only)
+            _idle_fidget(driver_arg, random.uniform(0.1, 0.3))
+        _human_move_and_click(driver_arg, element, click_only=click_only)
 
     return _fill_checkout(driver, _type_stealth, _stealth_move_and_click,
                           skip_honeypot=skip_honeypot)
@@ -1421,38 +1548,6 @@ def _export_and_confirm(driver, run_index: int, session_id: str | None = None) -
     print(f"  Events: {len(mouse)} mouse, {len(clicks)} clicks, "
           f"{len(keystrokes)} keystrokes, {len(scroll)} scroll")
 
-    # Quality gate — reject sessions that are too easy / broken
-    key_frac = len(keystrokes) / total if total else 0
-    scroll_frac = len(scroll) / total if total else 0
-
-    # Estimate duration from event timestamps
-    all_times = (
-        [e.get("t", 0) for e in mouse]
-        + [e.get("t", 0) for e in clicks]
-        + [e.get("t", 0) for e in keystrokes]
-        + [e.get("t", 0) for e in scroll]
-    )
-    duration_s = (max(all_times) - min(all_times)) / 1000 if all_times else 0
-    event_rate = total / duration_s if duration_s > 0 else 0
-
-    reject_reasons = []
-    if len(scroll) == 0:
-        reject_reasons.append("zero scroll events")
-    if key_frac >= 0.6:
-        reject_reasons.append(f"key_frac={key_frac:.2f} >= 0.60")
-    if duration_s >= 120 and event_rate <= 4:
-        reject_reasons.append(f"long sparse ({duration_s:.0f}s, {event_rate:.1f} evt/s)")
-
-    if reject_reasons:
-        # Keep ~5% of low-quality sessions so the agent still sees easy bots
-        if random.random() < 0.95:
-            print(f"  REJECTED: {', '.join(reject_reasons)}")
-            return
-        print(f"  KEPT (5% sample): {', '.join(reject_reasons)}")
-
-    print(f"  Quality: key_frac={key_frac:.2f}, scroll_frac={scroll_frac:.2f}, "
-          f"duration={duration_s:.1f}s, rate={event_rate:.1f}/s")
-
     # Save JSON
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S-%f")
@@ -1527,10 +1622,10 @@ def main():
             try:
                 bot_type = args.type
                 if bot_type == "mixed":
-                    # Weighted: favor harder-to-detect bots for better training data
+                    # 50% stealth (hardest), 25% scripted (medium), 25% easy/obvious bots
                     bot_type = random.choices(
                         ["linear", "scripted", "tabber", "slow", "erratic", "speedrun", "stealth"],
-                        weights=[0.05, 0.25, 0.05, 0.05, 0.10, 0.05, 0.45],
+                        weights=[0.05, 0.25, 0.05, 0.05, 0.05, 0.05, 0.50],
                     )[0]
                     print(f"  Mixed mode → {bot_type}")
 
