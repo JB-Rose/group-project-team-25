@@ -392,7 +392,17 @@ def _human_scroll(driver, scrolls: int = 3):
 # ---------------------------------------------------------------------------
 
 def _go_home(driver):
-    """Navigate to the home page and wait for concert cards to load."""
+    """Navigate to the home page and wait for concert cards to load.
+
+    Clears sessionStorage first so tracking.js creates a fresh session ID.
+    Without this, sessionStorage persists across page reloads in the same
+    tab, causing every run to reuse the previous session ID and accumulate
+    telemetry into one giant session.
+    """
+    # Load page first so we have a JS context to clear storage
+    driver.get(SITE_URL)
+    driver.execute_script("window.sessionStorage.clear();")
+    # Reload — tracking.js will see no tm_session_id and generate a fresh one
     driver.get(SITE_URL)
     wait_for(driver, ".tickets-button", timeout=10)
     # Mark this session as a bot so Confirmation.jsx won't auto-confirm as human
@@ -726,6 +736,7 @@ def linear_bot(driver, skip_honeypot=False):
     _go_home(driver)
     _page_sweep(driver)
     _idle_fidget(driver, random.uniform(0.5, 1.5))
+    _random_scroll(driver, scrolls=random.randint(1, 2))
 
     if not _pick_concert(driver, _linear_move_and_click):
         return
@@ -771,6 +782,7 @@ def tabber_bot(driver, skip_honeypot=False):
     """Keyboard-only bot — navigates entirely via Tab/Enter, no mouse at all.
     Easy to detect: zero mouse events, perfectly regular key timing."""
     _go_home(driver)
+    _random_scroll(driver, scrolls=1)
     time.sleep(random.uniform(1.0, 2.0))
 
     # Tab to a tickets button and press Enter
@@ -813,24 +825,24 @@ def tabber_bot(driver, skip_honeypot=False):
 
 
 def slow_bot(driver, skip_honeypot=False):
-    """Slow methodical bot — long pauses between actions (5-10s), very regular.
+    """Slow methodical bot — moderate pauses between actions, very regular.
     Mimics a careful person but timing is unnaturally consistent."""
     _go_home(driver)
-    time.sleep(random.uniform(5.0, 10.0))
+    time.sleep(random.uniform(1.5, 3.0))
 
     _human_scroll(driver, scrolls=1)
-    time.sleep(random.uniform(5.0, 8.0))
+    time.sleep(random.uniform(1.5, 2.5))
 
     if not _pick_concert(driver, _human_move_and_click):
         return
-    time.sleep(random.uniform(5.0, 10.0))
+    time.sleep(random.uniform(1.5, 3.0))
 
     _human_scroll(driver, scrolls=1)
-    time.sleep(random.uniform(4.0, 7.0))
+    time.sleep(random.uniform(1.0, 2.0))
 
     if not _pick_section(driver, _human_move_and_click):
         return
-    time.sleep(random.uniform(5.0, 8.0))
+    time.sleep(random.uniform(1.5, 2.5))
 
     return _fill_checkout(driver, _type_human, _human_move_and_click, skip_honeypot=skip_honeypot)
 
@@ -880,6 +892,7 @@ def speedrun_bot(driver, skip_honeypot=False):
     Minimal mouse movement, instant typing, near-zero pauses.
     Very easy to detect: session duration is unnaturally short."""
     _go_home(driver)
+    _random_scroll(driver, scrolls=1)
     time.sleep(0.3)
 
     if not _pick_concert(driver, _linear_move_and_click):
@@ -969,6 +982,256 @@ def speedrun_bot(driver, skip_honeypot=False):
         _handle_challenge(driver, _linear_move_and_click)
 
     return captured_sid
+
+
+# ---------------------------------------------------------------------------
+# Human data loading for stealth bot
+# ---------------------------------------------------------------------------
+
+HUMAN_DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "human"
+
+
+def _load_human_timing_profiles() -> list[dict]:
+    """Load human session data and extract timing profiles.
+
+    Returns a list of timing profiles, each containing:
+    - mouse_intervals: list of inter-event gaps (ms) during mouse movement
+    - click_intervals: list of inter-click gaps (ms)
+    - key_intervals: list of inter-keystroke gaps (ms)
+    - scroll_deltas: list of scroll dy values
+    - scroll_intervals: list of inter-scroll gaps (ms)
+    - duration: total session duration (ms)
+    - event_counts: dict of event type counts
+    """
+    profiles = []
+    if not HUMAN_DATA_DIR.exists():
+        return profiles
+
+    for json_file in sorted(HUMAN_DATA_DIR.glob("*.json")):
+        try:
+            with open(json_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            continue
+
+        # Handle live_confirm format (has "segments" at top level)
+        segments = []
+        if isinstance(data, dict):
+            if "segments" in data:
+                segments = data["segments"]
+            else:
+                for val in data.values():
+                    if isinstance(val, dict) and "segments" in val:
+                        segments.extend(val["segments"])
+        if not segments:
+            continue
+
+        # Merge events across segments
+        all_mouse = []
+        all_clicks = []
+        all_keys = []
+        all_scroll = []
+        for seg in segments:
+            all_mouse.extend(seg.get("mouse", []))
+            all_clicks.extend(seg.get("clicks", []))
+            all_keys.extend(seg.get("keystrokes", []))
+            all_scroll.extend(seg.get("scroll", []))
+
+        # Extract timing intervals
+        mouse_intervals = []
+        for i in range(1, len(all_mouse)):
+            t0 = all_mouse[i - 1].get("t", 0)
+            t1 = all_mouse[i].get("t", 0)
+            dt = t1 - t0
+            if 0 < dt < 5000:  # filter outlier gaps
+                mouse_intervals.append(dt)
+
+        click_intervals = []
+        for i in range(1, len(all_clicks)):
+            t0 = all_clicks[i - 1].get("t", 0)
+            t1 = all_clicks[i].get("t", 0)
+            dt = t1 - t0
+            if 0 < dt < 30000:
+                click_intervals.append(dt)
+
+        key_intervals = []
+        key_downs = [k for k in all_keys if k.get("type") == "down"]
+        for i in range(1, len(key_downs)):
+            t0 = key_downs[i - 1].get("t", 0)
+            t1 = key_downs[i].get("t", 0)
+            dt = t1 - t0
+            if 0 < dt < 5000:
+                key_intervals.append(dt)
+
+        scroll_deltas = [s.get("dy", 0) for s in all_scroll if s.get("dy")]
+        scroll_intervals = []
+        for i in range(1, len(all_scroll)):
+            t0 = all_scroll[i - 1].get("t", 0)
+            t1 = all_scroll[i].get("t", 0)
+            dt = t1 - t0
+            if 0 < dt < 5000:
+                scroll_intervals.append(dt)
+
+        # Session duration
+        all_times = (
+            [m.get("t", 0) for m in all_mouse]
+            + [c.get("t", 0) for c in all_clicks]
+            + [k.get("t", 0) for k in all_keys]
+            + [s.get("t", 0) for s in all_scroll]
+        )
+        duration = max(all_times) - min(all_times) if all_times else 0
+
+        profiles.append({
+            "mouse_intervals": mouse_intervals,
+            "click_intervals": click_intervals,
+            "key_intervals": key_intervals,
+            "scroll_deltas": scroll_deltas,
+            "scroll_intervals": scroll_intervals,
+            "duration": duration,
+            "event_counts": {
+                "mouse": len(all_mouse),
+                "clicks": len(all_clicks),
+                "keys": len(all_keys),
+                "scroll": len(all_scroll),
+            },
+        })
+
+    return profiles
+
+
+def _sample_from_human(intervals: list[float], fallback_min: float = 50,
+                       fallback_max: float = 300) -> float:
+    """Sample a timing value from real human intervals with noise.
+
+    Picks a random value from the list, adds Gaussian jitter (±20%),
+    and clamps to reasonable bounds. Falls back to uniform if no data.
+    Returns seconds.
+    """
+    if not intervals:
+        return random.uniform(fallback_min, fallback_max) / 1000.0
+
+    base = random.choice(intervals)
+    jittered = base * random.uniform(0.8, 1.2)
+    clamped = max(5, min(500, jittered))
+    return clamped / 1000.0
+
+
+def stealth_bot(driver, skip_honeypot=False):
+    """Stealth bot — designed to mimic real human behavior using timing
+    profiles extracted from actual human sessions in data/human/.
+
+    Uses human mouse timing, keystroke rhythm, scroll patterns, and
+    natural fidgeting/browsing behavior. Hardest bot type to detect.
+    """
+    # Load human timing profiles
+    profiles = _load_human_timing_profiles()
+    if profiles:
+        profile = random.choice(profiles)
+        print(f"  Using human timing profile ({profile['event_counts']})")
+    else:
+        profile = None
+        print("  WARNING: No human data in data/human/, using synthetic timing")
+
+    key_intervals = profile["key_intervals"] if profile else []
+    scroll_deltas = profile["scroll_deltas"] if profile else []
+
+    # Randomly pick a persona: 60% quick decisive, 40% indecisive browser
+    indecisive = random.random() < 0.4
+    if indecisive:
+        print("  Persona: indecisive browser")
+    else:
+        print("  Persona: quick decisive")
+
+    # --- Page 1: Home ---
+    _go_home(driver)
+
+    _page_sweep(driver)
+    _idle_fidget(driver, random.uniform(0.5, 1.2))
+
+    _human_scroll(driver, scrolls=random.randint(1, 2))
+    _idle_fidget(driver, random.uniform(0.3, 0.8))
+
+    if indecisive:
+        # Scroll back up, look around more
+        _human_scroll(driver, scrolls=1)
+        _idle_fidget(driver, random.uniform(0.5, 1.5))
+        _page_sweep(driver)
+        _idle_fidget(driver, random.uniform(0.8, 2.0))
+
+    if not _pick_concert(driver, _human_move_and_click):
+        return
+
+    # --- Page 2: Seat Selection ---
+    _idle_fidget(driver, random.uniform(0.4, 1.0))
+    _human_scroll(driver, scrolls=1)
+    _idle_fidget(driver, random.uniform(0.3, 0.8))
+
+    if indecisive:
+        # Browse sections more, scroll around
+        _page_sweep(driver)
+        _idle_fidget(driver, random.uniform(0.5, 1.5))
+        _human_scroll(driver, scrolls=1)
+        _idle_fidget(driver, random.uniform(0.3, 1.0))
+
+    if not _pick_section(driver, _human_move_and_click):
+        return
+
+    # --- Page 3: Checkout ---
+    _idle_fidget(driver, random.uniform(0.3, 0.8))
+
+    if random.random() < 0.5:
+        _human_scroll(driver, scrolls=1)
+
+    if indecisive:
+        # Read the form first before filling
+        _page_sweep(driver)
+        _idle_fidget(driver, random.uniform(0.5, 1.2))
+
+    # Typing speed varies by persona
+    think_prob = 0.12 if indecisive else 0.06
+    think_min = 0.3 if indecisive else 0.2
+    think_max = 0.8 if indecisive else 0.5
+    key_fallback_min = 80 if indecisive else 60
+    key_fallback_max = 350 if indecisive else 200
+
+    def _type_stealth(element, text):
+        """Type using timing sampled from real human keystroke data."""
+        element.clear()
+        time.sleep(random.uniform(0.1, 0.3))
+
+        i = 0
+        while i < len(text):
+            # Burst typing (30% chance, like real humans)
+            burst_len = 1
+            if random.random() < 0.3 and i + 2 < len(text):
+                burst_len = random.randint(2, 3)
+
+            for j in range(burst_len):
+                if i + j >= len(text):
+                    break
+                element.send_keys(text[i + j])
+                time.sleep(random.uniform(0.02, 0.06))
+
+            i += burst_len
+
+            if i < len(text):
+                if random.random() < think_prob:
+                    time.sleep(random.uniform(think_min, think_max))
+                else:
+                    delay = _sample_from_human(key_intervals,
+                                               key_fallback_min, key_fallback_max)
+                    time.sleep(delay)
+
+    fidget_prob = 0.5 if indecisive else 0.3
+
+    def _stealth_move_and_click(driver, element, click_only=False):
+        """Move to element with occasional fidgeting before click."""
+        if random.random() < fidget_prob:
+            _idle_fidget(driver, random.uniform(0.1, 0.3))
+        _human_move_and_click(driver, element, click_only=click_only)
+
+    return _fill_checkout(driver, _type_stealth, _stealth_move_and_click,
+                          skip_honeypot=skip_honeypot)
 
 
 def replay_bot(driver, source_path: str, skip_honeypot=False):
@@ -1158,6 +1421,38 @@ def _export_and_confirm(driver, run_index: int, session_id: str | None = None) -
     print(f"  Events: {len(mouse)} mouse, {len(clicks)} clicks, "
           f"{len(keystrokes)} keystrokes, {len(scroll)} scroll")
 
+    # Quality gate — reject sessions that are too easy / broken
+    key_frac = len(keystrokes) / total if total else 0
+    scroll_frac = len(scroll) / total if total else 0
+
+    # Estimate duration from event timestamps
+    all_times = (
+        [e.get("t", 0) for e in mouse]
+        + [e.get("t", 0) for e in clicks]
+        + [e.get("t", 0) for e in keystrokes]
+        + [e.get("t", 0) for e in scroll]
+    )
+    duration_s = (max(all_times) - min(all_times)) / 1000 if all_times else 0
+    event_rate = total / duration_s if duration_s > 0 else 0
+
+    reject_reasons = []
+    if len(scroll) == 0:
+        reject_reasons.append("zero scroll events")
+    if key_frac >= 0.6:
+        reject_reasons.append(f"key_frac={key_frac:.2f} >= 0.60")
+    if duration_s >= 120 and event_rate <= 4:
+        reject_reasons.append(f"long sparse ({duration_s:.0f}s, {event_rate:.1f} evt/s)")
+
+    if reject_reasons:
+        # Keep ~5% of low-quality sessions so the agent still sees easy bots
+        if random.random() < 0.95:
+            print(f"  REJECTED: {', '.join(reject_reasons)}")
+            return
+        print(f"  KEPT (5% sample): {', '.join(reject_reasons)}")
+
+    print(f"  Quality: key_frac={key_frac:.2f}, scroll_frac={scroll_frac:.2f}, "
+          f"duration={duration_s:.1f}s, rate={event_rate:.1f}/s")
+
     # Save JSON
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S-%f")
@@ -1208,7 +1503,7 @@ def _export_and_confirm(driver, run_index: int, session_id: str | None = None) -
 def main():
     parser = argparse.ArgumentParser(description="Run bot against TicketMonarch")
     parser.add_argument("--runs", type=int, default=3, help="Number of bot sessions")
-    parser.add_argument("--type", choices=["linear", "scripted", "replay", "tabber", "slow", "erratic", "speedrun", "mixed"], default="scripted")
+    parser.add_argument("--type", choices=["linear", "scripted", "replay", "tabber", "slow", "erratic", "speedrun", "stealth", "mixed"], default="scripted")
     parser.add_argument("--replay-source", type=str, help="JSON file for replay bot")
     parser.add_argument("--pause-between", type=float, default=2.0, help="Seconds between runs")
     parser.add_argument("--skip-honeypot", action="store_true", help="Skip unknown form fields (avoids honeypot traps)")
@@ -1232,7 +1527,11 @@ def main():
             try:
                 bot_type = args.type
                 if bot_type == "mixed":
-                    bot_type = random.choice(["linear", "scripted", "tabber", "slow", "erratic", "speedrun"])
+                    # Weighted: favor harder-to-detect bots for better training data
+                    bot_type = random.choices(
+                        ["linear", "scripted", "tabber", "slow", "erratic", "speedrun", "stealth"],
+                        weights=[0.05, 0.25, 0.05, 0.05, 0.10, 0.05, 0.45],
+                    )[0]
                     print(f"  Mixed mode → {bot_type}")
 
                 skip = args.skip_honeypot
@@ -1254,6 +1553,8 @@ def main():
                     captured_sid = erratic_bot(driver, skip_honeypot=skip)
                 elif bot_type == "speedrun":
                     captured_sid = speedrun_bot(driver, skip_honeypot=skip)
+                elif bot_type == "stealth":
+                    captured_sid = stealth_bot(driver, skip_honeypot=skip)
                 run_succeeded = captured_sid is not None
                 if run_succeeded:
                     print(f"  Run {i + 1} complete.")
