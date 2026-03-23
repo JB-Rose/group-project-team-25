@@ -241,7 +241,11 @@ function Checkout() {
     }
 
     if (decision === 'block') {
-      setChallengeState({ type: 'blocked' })
+      // Show a hard puzzle instead of a hard block — humans can still prove
+      // themselves. The RL agent's "block" decision is still recorded
+      // internally; online learning on the Confirmation page will penalise
+      // the agent for false-positives once the true label is revealed.
+      setChallengeState({ type: 'puzzle', difficulty: 'hard' })
       setProcessing(false)
       return
     }
