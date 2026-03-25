@@ -84,12 +84,7 @@ class EventEncoder:
         self.config = config
 
     def build_timeline(self, session: Session) -> list[dict]:
-        """Merge all events, subsample mouse, sort by timestamp.
-
-        The first click and all events before it are dropped so that
-        human and bot sessions start from the same point (humans have
-        an extra initial click to focus the browser / start the flow).
-        """
+        """Merge all events, subsample mouse, sort by timestamp."""
         events = []
 
         for i, evt in enumerate(session.mouse):
@@ -108,14 +103,19 @@ class EventEncoder:
 
         events.sort(key=lambda e: e.get("t", e.get("timestamp", 0)))
 
-        # Drop the first click and everything before it to normalize
-        # the start of human vs bot sessions.
-        first_click_idx = next(
-            (i for i, e in enumerate(events) if e["_type"] == EVENT_CLICK),
-            None,
-        )
-        if first_click_idx is not None:
-            events = events[first_click_idx + 1:]
+        # Human only: drop post-purchase events (confirmation page).
+        # Bots don't reach confirmation, so keeping it for humans would
+        # leak an asymmetric signal the model could exploit as a shortcut.
+        if session.label == 1:
+            purchase_idx = next(
+                (i for i, e in enumerate(events)
+                 if e["_type"] == EVENT_CLICK
+                 and isinstance(e.get("target"), dict)
+                 and e["target"].get("classes") == "purchase-button"),
+                None,
+            )
+            if purchase_idx is not None:
+                events = events[:purchase_idx + 1]  # keep the click, drop the tail
 
         return events
 
