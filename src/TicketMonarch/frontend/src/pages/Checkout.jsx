@@ -41,6 +41,7 @@ function Checkout() {
   const [challengeState, setChallengeState] = useState(null)
   const [processing, setProcessing] = useState(false)
   const [errors, setErrors] = useState({})
+  const [displayValues, setDisplayValues] = useState({ card_number: '' })
 
   // honeypot state (driven by rolling inference)
   const [honeypotDeployed, setHoneypotDeployed] = useState(false)
@@ -94,6 +95,9 @@ function Checkout() {
       ...prev,
       [name]: value
     }))
+    if (name === 'card_number') {
+        setDisplayValues(prev => ({ ...prev, card_number: value.replace(/\D/g, '')
+                                  .slice(0, 19).replace(/(.{4})/g, '$1 ').trim() })) }
     // clear error for this field on change
     if (errors[name]) {
       setErrors(prev => ({ ...prev, [name]: null }))
@@ -331,7 +335,7 @@ function Checkout() {
                   id="card_number"
                   name="card_number"
                   className={errors.card_number ? 'input-error' : ''}
-                  value={formData.card_number}
+                  value={displayValues.card_number}
                   onChange={handleChange}
                   placeholder="1234 5678 9012 3456"
                 />
