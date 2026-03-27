@@ -174,4 +174,33 @@ src/
 
 ---
 
+## Troubleshooting
+
+### macOS: Port 5000 Conflict (AirPlay Receiver)
+
+On **macOS Monterey and later**, port 5000 is used by the system's **AirPlay Receiver** feature, which will prevent the Flask backend from starting.
+
+**Symptoms:** `Address already in use` error when running `python TicketMonarch/backend/app.py`
+
+**Fix — Disable AirPlay Receiver:**
+
+1. Open **System Settings** (or System Preferences on older macOS)
+2. Go to **General** → **AirDrop & Handoff**
+3. Turn off **AirPlay Receiver**
+4. After disabling it, restart the backend. Port 5000 will now be free.
+     
+**Alternative — Run the backend on a different port:**
+
+1. If you prefer to keep AirPlay Receiver enabled, you can change the backend port. In `TicketMonarch/backend/app.py`, find the last line and update it:
+   ```python
+   # Change 5000 to any free port, e.g. 5001
+   app.run(debug=True, port=5001)
+   ```
+3. Then update `TicketMonarch/frontend/vite.config.js` to proxy to the new port:
+   ```js
+   proxy: {
+     '/api': 'http://localhost:5001'
+   }
+   ```
+
 *CMPE 195A/B - Senior Design Project | San Jose State University | Spring 2026*
