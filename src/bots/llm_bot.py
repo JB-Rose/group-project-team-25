@@ -486,6 +486,9 @@ async def run_llm_bot(provider: str = "anthropic", task: str | None = None,
     elif provider == "openai":
         from browser_use import ChatOpenAI
         llm = ChatOpenAI(model="gpt-4o")
+    elif provider == "gemini":
+        from browser_use.llm import ChatGoogle
+        llm = ChatGoogle(model="gemini-2.5-flash")
     else:
         print(f"Unknown provider: {provider}")
         sys.exit(1)
@@ -601,7 +604,7 @@ async def run_multiple(provider: str, runs: int, task: str | None,
 def main():
     parser = argparse.ArgumentParser(description="Run LLM-powered bot")
     parser.add_argument("--runs", type=int, default=1)
-    parser.add_argument("--provider", choices=["anthropic", "openai"], default="anthropic")
+    parser.add_argument("--provider", choices=["anthropic", "openai", "gemini"], default="anthropic")
     parser.add_argument("--pause-between", type=float, default=3.0)
     parser.add_argument("--task", type=str, default=None)
     parser.add_argument("--inject-events", action="store_true",
