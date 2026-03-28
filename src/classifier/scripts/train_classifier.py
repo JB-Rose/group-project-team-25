@@ -3,14 +3,18 @@
 Usage (from repo root):
     python classifier/scripts/train_classifier.py --data-dir data/ --output-dir classifier/models/xgb_v1
 
+    # With hyperparameter tuning (requires optuna):
+    python classifier/scripts/train_classifier.py --data-dir data/ --tune --n-trials 50
+
 The script:
     1. Loads labeled sessions from data/human/ (label=1) and data/bot/ (label=0)
-    2. Extracts 22 aggregate features per session
-    3. Splits data into train/test sets (80/20 stratified)
-    4. Trains on train set with early stopping on test set
-    5. Prints accuracy, F1, ROC-AUC on held-out test set
-    6. Prints ranked feature importances
-    7. Saves the model to --output-dir
+    2. Splits data into train/test (80/20 stratified)
+    3. Extracts 39 aggregate features per session
+    4. Optionally tunes hyperparameters with Optuna
+    5. Trains on train set
+    6. Evaluates on held-out test set
+    7. Prints ranked feature importances
+    8. Saves the model to --output-dir
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 from classifier.data_loader import load_from_directory
 from classifier.features import SessionFeatureExtractor, FEATURE_NAMES
 from classifier.model import HumanLikelihoodClassifier
+from rl_captcha.config import ClassifierConfig
 
 
 def parse_args() -> argparse.Namespace:
@@ -48,7 +53,107 @@ def parse_args() -> argparse.Namespace:
         "--random-state", type=int, default=42,
         help="Random seed for reproducibility",
     )
+    p.add_argument(
+        "--no-adversarial", action="store_true",
+        help="Disable adversarial augmentation (humanized bot copies)",
+    )
+    p.add_argument(
+        "--tune", action="store_true",
+        help="Run Optuna hyperparameter tuning before final training",
+    )
+    p.add_argument(
+        "--n-trials", type=int, default=50,
+        help="Number of Optuna trials (default: 50)",
+    )
     return p.parse_args()
+
+
+def tune_hyperparameters(
+    X: np.ndarray,
+    y: np.ndarray,
+    n_trials: int,
+    random_state: int,
+) -> ClassifierConfig:
+    """Run Optuna hyperparameter search with cross-validation scoring."""
+    try:
+        import optuna
+    except ImportError:
+        print("ERROR: optuna is required for --tune. Install with: pip install optuna")
+        sys.exit(1)
+
+    from sklearn.model_selection import StratifiedKFold
+    from sklearn.metrics import roc_auc_score
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    def objective(trial: optuna.Trial) -> float:
+        cfg = ClassifierConfig(
+            n_estimators=200,
+            max_depth=trial.suggest_int("max_depth", 2, 6),
+            learning_rate=trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+            subsample=trial.suggest_float("subsample", 0.5, 1.0),
+            colsample_bytree=trial.suggest_float("colsample_bytree", 0.5, 1.0),
+            min_child_weight=trial.suggest_int("min_child_weight", 1, 10),
+            reg_alpha=trial.suggest_float("reg_alpha", 1e-3, 10.0, log=True),
+            reg_lambda=trial.suggest_float("reg_lambda", 1e-3, 10.0, log=True),
+            gamma=trial.suggest_float("gamma", 0.0, 1.0),
+            feature_noise_std=trial.suggest_float("feature_noise_std", 0.0, 1.0),
+            n_augment_copies=trial.suggest_int("n_augment_copies", 0, 5),
+            label_smooth_alpha=trial.suggest_float("label_smooth_alpha", 0.0, 0.15),
+            adversarial_augment=trial.suggest_categorical("adversarial_augment", [True, False]),
+            n_adversarial_copies=trial.suggest_int("n_adversarial_copies", 1, 4),
+            adversarial_blend_range=(
+                trial.suggest_float("adv_blend_lo", 0.1, 0.4),
+                trial.suggest_float("adv_blend_hi", 0.3, 0.7),
+            ),
+            adversarial_noise_std=trial.suggest_float("adversarial_noise_std", 0.1, 0.5),
+            random_state=random_state,
+        )
+
+        skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=random_state)
+        aucs = []
+        for train_idx, val_idx in skf.split(X, y):
+            X_tr, X_va = X[train_idx], X[val_idx]
+            y_tr, y_va = y[train_idx], y[val_idx]
+
+            clf = HumanLikelihoodClassifier(config=cfg)
+            clf.fit(X_tr, y_tr, X_val=X_va, y_val=y_va)
+
+            try:
+                auc = roc_auc_score(y_va, clf.human_score(X_va))
+            except ValueError:
+                auc = 0.5
+            aucs.append(auc)
+
+        return float(np.mean(aucs))
+
+    study = optuna.create_study(direction="maximize")
+    study.optimize(objective, n_trials=n_trials)
+
+    best = study.best_params
+    print(f"\n--- Optuna Best Trial (AUC={study.best_value:.4f}) ---")
+    for k, v in best.items():
+        print(f"  {k}: {v}")
+
+    return ClassifierConfig(
+        n_estimators=200,
+        max_depth=best["max_depth"],
+        learning_rate=best["learning_rate"],
+        subsample=best["subsample"],
+        colsample_bytree=best["colsample_bytree"],
+        min_child_weight=best["min_child_weight"],
+        reg_alpha=best["reg_alpha"],
+        reg_lambda=best["reg_lambda"],
+        gamma=best["gamma"],
+        feature_noise_std=best["feature_noise_std"],
+        n_augment_copies=best["n_augment_copies"],
+        label_smooth_alpha=best["label_smooth_alpha"],
+        adversarial_augment=best["adversarial_augment"],
+        n_adversarial_copies=best["n_adversarial_copies"],
+        adversarial_blend_range=(best["adv_blend_lo"], best["adv_blend_hi"]),
+        adversarial_noise_std=best["adversarial_noise_std"],
+        random_state=random_state,
+    )
 
 
 def main() -> None:
@@ -89,43 +194,11 @@ def main() -> None:
     print(f"  Feature matrix shape: {X.shape}  (sessions x features)")
 
     # ------------------------------------------------------------------
-    # 3. Cross-validation for honest generalization estimate
+    # 3. Train / Test split
     # ------------------------------------------------------------------
-    from sklearn.model_selection import StratifiedKFold, train_test_split
+    from sklearn.model_selection import train_test_split
     from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 
-    n_folds = 5
-    print(f"\n[train_classifier] Running {n_folds}-fold stratified cross-validation ...")
-    skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=args.random_state)
-
-    cv_accs, cv_f1s, cv_aucs = [], [], []
-    for fold_i, (train_idx, val_idx) in enumerate(skf.split(X, y), start=1):
-        X_tr, X_va = X[train_idx], X[val_idx]
-        y_tr, y_va = y[train_idx], y[val_idx]
-
-        fold_clf = HumanLikelihoodClassifier()
-        fold_clf.fit(X_tr, y_tr, X_val=X_va, y_val=y_va)
-
-        y_pred_f = fold_clf.predict(X_va)
-        y_score_f = fold_clf.human_score(X_va)
-
-        cv_accs.append(accuracy_score(y_va, y_pred_f))
-        cv_f1s.append(f1_score(y_va, y_pred_f, zero_division=0))
-        try:
-            cv_aucs.append(roc_auc_score(y_va, y_score_f))
-        except ValueError:
-            cv_aucs.append(float("nan"))
-
-        print(f"  Fold {fold_i}: Acc={cv_accs[-1]:.4f}  F1={cv_f1s[-1]:.4f}  AUC={cv_aucs[-1]:.4f}")
-
-    print(f"\n--- Cross-Validation Summary ({n_folds}-fold) ---")
-    print(f"  Accuracy : {np.mean(cv_accs):.4f} +/- {np.std(cv_accs):.4f}")
-    print(f"  F1 Score : {np.mean(cv_f1s):.4f} +/- {np.std(cv_f1s):.4f}")
-    print(f"  ROC-AUC  : {np.nanmean(cv_aucs):.4f} +/- {np.nanstd(cv_aucs):.4f}")
-
-    # ------------------------------------------------------------------
-    # 4. Final model: train/test split for the saved model
-    # ------------------------------------------------------------------
     X_train, X_test, y_train, y_test = train_test_split(
         X, y,
         test_size=args.test_size,
@@ -133,19 +206,33 @@ def main() -> None:
         random_state=args.random_state,
     )
 
-    n_human_train = int((y_train == 1).sum())
-    n_bot_train   = int((y_train == 0).sum())
-    n_human_test  = int((y_test == 1).sum())
-    n_bot_test    = int((y_test == 0).sum())
-    print(f"\n  Train set: {len(y_train)} ({n_human_train}H / {n_bot_train}B)")
-    print(f"  Test set : {len(y_test)} ({n_human_test}H / {n_bot_test}B)")
+    n_h_train = int((y_train == 1).sum())
+    n_b_train = int((y_train == 0).sum())
+    n_h_test  = int((y_test == 1).sum())
+    n_b_test  = int((y_test == 0).sum())
 
-    print(f"\n[train_classifier] Training final model on {len(y_train)} sessions ...")
-    clf = HumanLikelihoodClassifier()
-    clf.fit(X_train, y_train, X_val=X_test, y_val=y_test)
+    print(f"\n  Train set: {len(y_train)} ({n_h_train}H / {n_b_train}B)")
+    print(f"  Test set : {len(y_test)} ({n_h_test}H / {n_b_test}B)")
 
     # ------------------------------------------------------------------
-    # 4b. Evaluate on held-out test set
+    # 4. Optional hyperparameter tuning
+    # ------------------------------------------------------------------
+    config = ClassifierConfig()
+    if args.no_adversarial:
+        config.adversarial_augment = False
+    if args.tune:
+        print(f"\n[train_classifier] Running Optuna tuning ({args.n_trials} trials) ...")
+        config = tune_hyperparameters(X_train, y_train, args.n_trials, args.random_state)
+
+    # ------------------------------------------------------------------
+    # 5. Train
+    # ------------------------------------------------------------------
+    print(f"\n[train_classifier] Training final model on {len(y_train)} sessions ...")
+    clf = HumanLikelihoodClassifier(config=config)
+    clf.fit(X_train, y_train)
+
+    # ------------------------------------------------------------------
+    # 6. Evaluate on held-out test set (never seen during training)
     # ------------------------------------------------------------------
     y_pred  = clf.predict(X_test)
     y_score = clf.human_score(X_test)
@@ -163,7 +250,7 @@ def main() -> None:
     print(f"  ROC-AUC  : {auc:.4f}")
 
     # ------------------------------------------------------------------
-    # 5. Feature importances
+    # 7. Feature importances
     # ------------------------------------------------------------------
     importances = clf.feature_importances(feature_names=FEATURE_NAMES)
     print("\n--- Feature Importances (descending) ---")
@@ -172,7 +259,7 @@ def main() -> None:
         print(f"  {name:<40s} {score:.4f}  {bar}")
 
     # ------------------------------------------------------------------
-    # 6. Save model
+    # 8. Save model
     # ------------------------------------------------------------------
     output_dir = Path(args.output_dir)
     clf.save(output_dir)

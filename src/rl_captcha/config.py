@@ -43,8 +43,8 @@ class ClassifierConfig:
     behavioral patterns.
     """
 
-    n_estimators: int = 50
-    max_depth: int = 2                     # very shallow trees reduce overfitting
+    n_estimators: int = 200
+    max_depth: int = 3
     learning_rate: float = 0.05            # slow learning + early stopping
     subsample: float = 0.7                 # row subsampling per tree
     colsample_bytree: float = 0.7          # feature subsampling per tree
@@ -63,6 +63,18 @@ class ClassifierConfig:
     # Feature noise augmentation: add Gaussian noise to training features
     # to simulate data variation and prevent reliance on exact values.
     feature_noise_std: float = 0.5          # std of noise relative to feature std
+    n_augment_copies: int = 3              # number of noisy copies to generate
+
+    # Adversarial augmentation: create "humanized" copies of bot samples
+    # by interpolating features toward the human distribution. Forces the
+    # classifier to learn deeper patterns instead of surface-level differences.
+    adversarial_augment: bool = True        # enable adversarial bot humanization
+    n_adversarial_copies: int = 2           # humanized copies per bot sample
+    adversarial_blend_range: tuple = (0.2, 0.6)  # (min, max) interpolation toward human mean
+    adversarial_noise_std: float = 0.3      # extra Gaussian noise on blended features
+
+    # Feature standardization
+    standardize: bool = True               # apply StandardScaler before training
 
 
 @dataclass
