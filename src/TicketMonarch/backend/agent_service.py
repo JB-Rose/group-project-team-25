@@ -42,9 +42,9 @@ from rl_captcha.environment.event_env import EventEncoder, ACTION_NAMES
 
 # Algorithm → default checkpoint subdirectory name
 _ALGO_DEFAULTS = {
-    "ppo": "ppo_run1",
-    "dg": "dg_run1",
-    "soft_ppo": "soft_ppo_run1",
+    "ppo": "ppo_noaug",
+    "dg": "dg_noaug",
+    "soft_ppo": "soft_ppo_noaug",
 }
 
 # Action masks matching EventEnv

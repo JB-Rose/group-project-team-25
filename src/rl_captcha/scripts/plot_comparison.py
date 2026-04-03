@@ -1,9 +1,22 @@
-"""Generate PPO vs DG vs Soft-PPO comparison figures.
+"""Generate comparison figures across all algorithm variants.
 
-Usage:
+Supports both 3-way (PPO vs DG vs Soft-PPO) and 6-way comparisons
+(each algorithm with and without adversarial augmentation).
+
+Usage (6-way comparison):
     python -m rl_captcha.scripts.plot_comparison \
-        --logs ppo=logs/ppo_training.log dg=logs/dg_training.log soft_ppo=logs/soft_ppo_training.log \
-        --evals ppo=logs/ppo_eval.log dg=logs/dg_eval.log soft_ppo=logs/soft_ppo_eval.log \
+        --logs ppo_noaug=logs/ppo_noaug_training.log \
+               ppo_advaug=logs/ppo_advaug_training.log \
+               dg_noaug=logs/dg_noaug_training.log \
+               dg_advaug=logs/dg_advaug_training.log \
+               soft_ppo_noaug=logs/soft_ppo_noaug_training.log \
+               soft_ppo_advaug=logs/soft_ppo_advaug_training.log \
+        --evals ppo_noaug=logs/ppo_noaug_eval.log \
+                ppo_advaug=logs/ppo_advaug_eval.log \
+                dg_noaug=logs/dg_noaug_eval.log \
+                dg_advaug=logs/dg_advaug_eval.log \
+                soft_ppo_noaug=logs/soft_ppo_noaug_eval.log \
+                soft_ppo_advaug=logs/soft_ppo_advaug_eval.log \
         --out figures/comparison/
 """
 
@@ -24,11 +37,29 @@ COLORS = {
     "ppo": "#4a90e2",
     "dg": "#e67e22",
     "soft_ppo": "#2ecc71",
+    "ppo_noaug": "#4a90e2",
+    "dg_noaug": "#e67e22",
+    "soft_ppo_noaug": "#2ecc71",
+    "ppo_advaug": "#2a70c2",
+    "dg_advaug": "#c66e12",
+    "soft_ppo_advaug": "#1eac61",
 }
 LABELS = {
     "ppo": "PPO",
     "dg": "DG",
     "soft_ppo": "Soft PPO",
+    "ppo_noaug": "PPO (no aug)",
+    "dg_noaug": "DG (no aug)",
+    "soft_ppo_noaug": "Soft PPO (no aug)",
+    "ppo_advaug": "PPO (adv aug)",
+    "dg_advaug": "DG (adv aug)",
+    "soft_ppo_advaug": "Soft PPO (adv aug)",
+}
+# Line styles: solid for no-aug, dashed for adv-aug
+LINESTYLES = {
+    "ppo": "-", "dg": "-", "soft_ppo": "-",
+    "ppo_noaug": "-", "dg_noaug": "-", "soft_ppo_noaug": "-",
+    "ppo_advaug": "--", "dg_advaug": "--", "soft_ppo_advaug": "--",
 }
 
 
@@ -78,7 +109,8 @@ def plot_comparison(
         rewards = np.array([r.get("avg_reward", 0) for r in all_rollouts[algo]])
         color = COLORS.get(algo, "#999999")
         label = LABELS.get(algo, algo)
-        ax.plot(steps_k[algo], smooth(rewards, 10), color=color, linewidth=2, label=label)
+        ls = LINESTYLES.get(algo, "-")
+        ax.plot(steps_k[algo], smooth(rewards, 10), color=color, linewidth=2, label=label, linestyle=ls)
         ax.fill_between(steps_k[algo], smooth(rewards, 20) - 0.05,
                         smooth(rewards, 20) + 0.05, color=color, alpha=0.1)
     ax.axhline(0, color="gray", linestyle="--", linewidth=0.5)
@@ -105,7 +137,8 @@ def plot_comparison(
         acc = _correct_pcts(all_rollouts[algo])
         color = COLORS.get(algo, "#999999")
         label = LABELS.get(algo, algo)
-        ax.plot(steps_k[algo], smooth(acc, 10), color=color, linewidth=2, label=f"{label} (train)")
+        ls = LINESTYLES.get(algo, "-")
+        ax.plot(steps_k[algo], smooth(acc, 10), color=color, linewidth=2, label=f"{label} (train)", linestyle=ls)
 
         # Overlay val accuracy points
         vs, va = [], []
@@ -134,7 +167,8 @@ def plot_comparison(
         ent = np.array([r.get("entropy", 0) for r in all_rollouts[algo]])
         color = COLORS.get(algo, "#999999")
         label = LABELS.get(algo, algo)
-        ax.plot(steps_k[algo], smooth(ent, 10), color=color, linewidth=2, label=label)
+        ls = LINESTYLES.get(algo, "-")
+        ax.plot(steps_k[algo], smooth(ent, 10), color=color, linewidth=2, label=label, linestyle=ls)
     ax.set_xlabel("Training Steps (x1K)")
     ax.set_ylabel("Policy Entropy")
     ax.set_title("Decision Confidence (Entropy)")
@@ -150,7 +184,8 @@ def plot_comparison(
         ploss = np.array([r.get("policy_loss", 0) for r in all_rollouts[algo]])
         color = COLORS.get(algo, "#999999")
         label = LABELS.get(algo, algo)
-        ax.plot(steps_k[algo], smooth(ploss, 10), color=color, linewidth=2, label=label)
+        ls = LINESTYLES.get(algo, "-")
+        ax.plot(steps_k[algo], smooth(ploss, 10), color=color, linewidth=2, label=label, linestyle=ls)
     ax.set_xlabel("Training Steps (x1K)")
     ax.set_ylabel("Policy Loss")
     ax.set_title("Policy Loss Comparison")
@@ -199,7 +234,11 @@ def plot_comparison(
             if n_eval == 1:
                 axes = [axes]
 
-            cmaps = {"ppo": "Blues", "dg": "Oranges", "soft_ppo": "Greens"}
+            cmaps = {
+                "ppo": "Blues", "dg": "Oranges", "soft_ppo": "Greens",
+                "ppo_noaug": "Blues", "dg_noaug": "Oranges", "soft_ppo_noaug": "Greens",
+                "ppo_advaug": "Blues", "dg_advaug": "Oranges", "soft_ppo_advaug": "Greens",
+            }
             for ax, algo in zip(axes, eval_algos):
                 result = all_evals[algo]
                 tp = result.get("tp", 0)
@@ -234,9 +273,9 @@ def plot_comparison(
             plt.close(fig)
             print(f"  Saved cmp_confusion.{fmt}")
 
-    # ── 7. Combined summary ──────────────────────────────────────────
-    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-    fig.suptitle("PPO vs DG vs Soft PPO — Complete Comparison",
+    # ── 7. Combined summary (2×2 training-only) ─────────────────────
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle("Algorithm Training Comparison",
                  fontsize=16, fontweight="bold", y=0.98)
 
     # (a) Reward
@@ -244,7 +283,8 @@ def plot_comparison(
     for algo in algos:
         rewards = np.array([r.get("avg_reward", 0) for r in all_rollouts[algo]])
         ax.plot(steps_k[algo], smooth(rewards, 10), color=COLORS.get(algo),
-                linewidth=2, label=LABELS.get(algo, algo))
+                linewidth=2, label=LABELS.get(algo, algo),
+                linestyle=LINESTYLES.get(algo, "-"))
     ax.axhline(0, color="gray", linestyle="--", linewidth=0.5)
     ax.set_xlabel("Steps (x1K)")
     ax.set_ylabel("Avg Reward")
@@ -257,7 +297,8 @@ def plot_comparison(
     for algo in algos:
         acc = _correct_pcts(all_rollouts[algo])
         ax.plot(steps_k[algo], smooth(acc, 10), color=COLORS.get(algo),
-                linewidth=2, label=LABELS.get(algo, algo))
+                linewidth=2, label=LABELS.get(algo, algo),
+                linestyle=LINESTYLES.get(algo, "-"))
     ax.set_xlabel("Steps (x1K)")
     ax.set_ylabel("Correct (%)")
     ax.set_title("(b) Train Accuracy")
@@ -267,11 +308,12 @@ def plot_comparison(
     ax.grid(True, alpha=0.3)
 
     # (c) Policy Loss
-    ax = axes[0, 2]
+    ax = axes[1, 0]
     for algo in algos:
         ploss = np.array([r.get("policy_loss", 0) for r in all_rollouts[algo]])
         ax.plot(steps_k[algo], smooth(ploss, 10), color=COLORS.get(algo),
-                linewidth=2, label=LABELS.get(algo, algo))
+                linewidth=2, label=LABELS.get(algo, algo),
+                linestyle=LINESTYLES.get(algo, "-"))
     ax.set_xlabel("Steps (x1K)")
     ax.set_ylabel("Policy Loss")
     ax.set_title("(c) Policy Loss")
@@ -279,53 +321,17 @@ def plot_comparison(
     ax.grid(True, alpha=0.3)
 
     # (d) Entropy
-    ax = axes[1, 0]
+    ax = axes[1, 1]
     for algo in algos:
         ent = np.array([r.get("entropy", 0) for r in all_rollouts[algo]])
         ax.plot(steps_k[algo], smooth(ent, 10), color=COLORS.get(algo),
-                linewidth=2, label=LABELS.get(algo, algo))
+                linewidth=2, label=LABELS.get(algo, algo),
+                linestyle=LINESTYLES.get(algo, "-"))
     ax.set_xlabel("Steps (x1K)")
     ax.set_ylabel("Entropy")
     ax.set_title("(d) Policy Entropy")
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
-
-    # (e) Eval metrics
-    ax = axes[1, 1]
-    if all_evals:
-        eval_algos = [a for a in algos if a in all_evals]
-        if eval_algos:
-            metric_names = ["Accuracy", "Precision", "Recall", "F1"]
-            x = np.arange(len(metric_names))
-            n_a = len(eval_algos)
-            w = 0.8 / n_a
-            for i, algo in enumerate(eval_algos):
-                vals = [all_evals[algo].get(m.lower(), 0) for m in metric_names]
-                offset = (i - (n_a - 1) / 2) * w
-                ax.bar(x + offset, vals, w, label=LABELS.get(algo, algo),
-                       color=COLORS.get(algo))
-            ax.set_xticks(x)
-            ax.set_xticklabels(metric_names)
-            ax.set_ylim(0, 1.15)
-    ax.set_title("(e) Test Metrics")
-    ax.legend(fontsize=9)
-    ax.grid(True, axis="y", alpha=0.3)
-
-    # (f) Summary text
-    ax = axes[1, 2]
-    if all_evals:
-        lines = []
-        for algo in algos:
-            if algo in all_evals:
-                e = all_evals[algo]
-                label = LABELS.get(algo, algo)
-                lines.append(f"{label:>10s}: Acc={e.get('accuracy',0):.3f}  F1={e.get('f1',0):.3f}")
-        text = "\n".join(lines)
-        ax.text(0.5, 0.5, text, transform=ax.transAxes, ha="center", va="center",
-                fontsize=14, fontfamily="monospace", fontweight="bold",
-                bbox=dict(boxstyle="round,pad=0.5", facecolor="lightyellow", edgecolor="gray"))
-    ax.set_title("(f) Summary")
-    ax.axis("off")
 
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     fig.savefig(out_dir / f"cmp_summary.{fmt}")
@@ -336,7 +342,7 @@ def plot_comparison(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="PPO vs DG vs Soft-PPO comparison figures")
+    parser = argparse.ArgumentParser(description="Algorithm comparison figures (with/without adversarial augmentation)")
     parser.add_argument("--logs", type=str, nargs="+", required=True,
                         help="Training logs as name=path pairs (e.g. ppo=logs/ppo_training.log)")
     parser.add_argument("--evals", type=str, nargs="+", default=None,

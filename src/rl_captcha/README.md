@@ -107,13 +107,17 @@ rl_captcha/
 │   ├── lstm_networks.py         # LSTMActorCritic (LSTM, 128 hidden)
 │   ├── rollout_buffer.py        # On-policy buffer with GAE + mask storage
 │   └── checkpoints/
-│       ├── ppo_run1/            # PPO trained weights
-│       ├── dg_run1/             # DG trained weights
-│       └── soft_ppo_run1/       # Soft PPO trained weights
+│       ├── ppo_noaug/           # PPO trained without adversarial augmentation
+│       ├── ppo_advaug/          # PPO trained with adversarial augmentation
+│       ├── dg_noaug/            # DG trained without adversarial augmentation
+│       ├── dg_advaug/           # DG trained with adversarial augmentation
+│       ├── soft_ppo_noaug/      # Soft PPO trained without adversarial augmentation
+│       └── soft_ppo_advaug/     # Soft PPO trained with adversarial augmentation
 │
 └── scripts/
     ├── train_ppo.py             # Train PPO/DG/Soft-PPO agent (--algorithm flag)
     ├── evaluate_ppo.py          # Evaluate one or more agents (multi-agent comparison)
+    ├── generate_augmented_data.py  # Pre-generate adversarially augmented bot sessions
     ├── plot_training.py         # Visualize training.log (auto-detects algorithm)
     ├── plot_comparison.py       # Side-by-side comparison of all algorithms
     ├── plot_eval.py             # Visualize evaluation results
@@ -142,31 +146,48 @@ Training data lives in `data/human/` (label=1) and `data/bot/` (label=0). Sessio
 
 ## Training
 
-All commands from the `src/` directory.
+All commands from the `src/` directory (PowerShell).
 
 ### 1. Collect Data
 
 **Human data:** Browse the live site normally. Sessions are auto-saved to `data/human/` when online learning runs via the `/api/agent/confirm` endpoint.
 
 **Bot data:** Run bots against the live site:
-```bash
+```powershell
 python bots/selenium_bot.py --runs 10 --type scripted
 python bots/llm_bot.py --runs 3 --provider anthropic
 ```
 
-### 2. Train
+### 2. Generate Adversarially Augmented Data
 
-Use `--algorithm` to select between `ppo`, `dg`, or `soft_ppo`:
+Pre-generate humanized copies of bot sessions using the same 3-tier pipeline as the classifier (Section 3.5.3). For every bot session, this creates `n_copies_per_level x 3 levels` augmented copies and saves them to `data/bot_augmented/`.
 
 ```powershell
-# Train PPO (default)
-python -u -m rl_captcha.scripts.train_ppo --algorithm ppo --data-dir data/ --save-path rl_captcha/agent/checkpoints/ppo_run1 --total-timesteps 500000 2>&1 | Tee-Object -FilePath logs/ppo_training.log
+python -u -m rl_captcha.scripts.generate_augmented_data --data-dir data/ --n-copies 2 --seed 42 2>&1 | Tee-Object -FilePath logs/generate_augmented.log
+```
 
-# Train DG
-python -u -m rl_captcha.scripts.train_ppo --algorithm dg --data-dir data/ --save-path rl_captcha/agent/checkpoints/dg_run1 --total-timesteps 500000 2>&1 | Tee-Object -FilePath logs/dg_training.log
+This only needs to be run once (or re-run if the source data changes).
 
-# Train Soft PPO
-python -u -m rl_captcha.scripts.train_ppo --algorithm soft_ppo --data-dir data/ --save-path rl_captcha/agent/checkpoints/soft_ppo_run1 --total-timesteps 500000 --target-entropy-ratio 0.5 2>&1 | Tee-Object -FilePath logs/soft_ppo_training.log
+### 3. Train All 6 Checkpoints
+
+Each algorithm is trained twice: once without adversarial augmentation (baseline) and once with augmented bot data included. The `--adversarial-augment` flag loads pre-generated sessions from `data/bot_augmented/` alongside the original data.
+
+```powershell
+# --- Without adversarial augmentation (baseline) ---
+
+python -u -m rl_captcha.scripts.train_ppo --algorithm ppo --data-dir data/ --save-path rl_captcha/agent/checkpoints/ppo_noaug --total-timesteps 500000 2>&1 | Tee-Object -FilePath logs/ppo_noaug_training.log
+
+python -u -m rl_captcha.scripts.train_ppo --algorithm dg --data-dir data/ --save-path rl_captcha/agent/checkpoints/dg_noaug --total-timesteps 500000 2>&1 | Tee-Object -FilePath logs/dg_noaug_training.log
+
+python -u -m rl_captcha.scripts.train_ppo --algorithm soft_ppo --data-dir data/ --save-path rl_captcha/agent/checkpoints/soft_ppo_noaug --total-timesteps 500000 --target-entropy-ratio 0.5 2>&1 | Tee-Object -FilePath logs/soft_ppo_noaug_training.log
+
+# --- With adversarial augmentation ---
+
+python -u -m rl_captcha.scripts.train_ppo --algorithm ppo --adversarial-augment --data-dir data/ --save-path rl_captcha/agent/checkpoints/ppo_advaug --total-timesteps 500000 2>&1 | Tee-Object -FilePath logs/ppo_advaug_training.log
+
+python -u -m rl_captcha.scripts.train_ppo --algorithm dg --adversarial-augment --data-dir data/ --save-path rl_captcha/agent/checkpoints/dg_advaug --total-timesteps 500000 2>&1 | Tee-Object -FilePath logs/dg_advaug_training.log
+
+python -u -m rl_captcha.scripts.train_ppo --algorithm soft_ppo --adversarial-augment --data-dir data/ --save-path rl_captcha/agent/checkpoints/soft_ppo_advaug --total-timesteps 500000 --target-entropy-ratio 0.5 2>&1 | Tee-Object -FilePath logs/soft_ppo_advaug_training.log
 ```
 
 #### Training CLI Flags
@@ -174,8 +195,9 @@ python -u -m rl_captcha.scripts.train_ppo --algorithm soft_ppo --data-dir data/ 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--algorithm` | `ppo` | Training algorithm: `ppo`, `dg`, or `soft_ppo` |
-| `--data-dir` | `data/` | Root directory containing `human/` and `bot/` subdirectories |
-| `--save-path` | `rl_captcha/agent/checkpoints/ppo_run1` | Where to save model checkpoints |
+| `--adversarial-augment` | off | Include pre-generated augmented bot sessions from `data/bot_augmented/` |
+| `--data-dir` | `data/` | Root directory containing `human/`, `bot/`, and `bot_augmented/` subdirectories |
+| `--save-path` | `rl_captcha/agent/checkpoints/ppo_noaug` | Where to save model checkpoints |
 | `--total-timesteps` | `500000` (from PPOConfig) | Total environment steps to train for |
 | `--log-interval` | `1` | Print stats every N rollouts |
 | `--save-interval` | `10` | Save checkpoint + run validation every N rollouts |
@@ -187,28 +209,33 @@ python -u -m rl_captcha.scripts.train_ppo --algorithm soft_ppo --data-dir data/ 
 | `--target-entropy-ratio` | `0.5` | Target entropy as fraction of max (Soft PPO only) |
 | `--alpha-lr` | `3e-4` | Entropy temperature learning rate (Soft PPO only) |
 
-### 3. Evaluate
+### 4. Evaluate All 6 Checkpoints
 
-Evaluate one or more checkpoints in a single run. Evaluation now includes **per-bot-family** and **per-tier** detection rate breakdowns alongside global metrics.
+Evaluate all checkpoints in a single run. Evaluation includes **per-bot-family** and **per-tier** detection rate breakdowns alongside global metrics, plus a side-by-side comparison table.
 
 ```powershell
-# Single agent — basic eval on test split
-python -m rl_captcha.scripts.evaluate_ppo --agent rl_captcha/agent/checkpoints/ppo_run1 --episodes 500 --split test
-
-# Single agent — eval on ALL data (no split)
-python -m rl_captcha.scripts.evaluate_ppo --agent rl_captcha/agent/checkpoints/ppo_run1 --episodes 500 --split all
-
-# All three agents at once (prints comparison table)
-python -m rl_captcha.scripts.evaluate_ppo --agent ppo=rl_captcha/agent/checkpoints/ppo_run1 dg=rl_captcha/agent/checkpoints/dg_run1 soft_ppo=rl_captcha/agent/checkpoints/soft_ppo_run1 --episodes 500 --split test 2>&1 | Tee-Object -FilePath logs/eval_all.log
-
-# Held-out generalization: hold out specific bot families from training
-python -m rl_captcha.scripts.evaluate_ppo --agent rl_captcha/agent/checkpoints/ppo_run1 --episodes 500 --held-out-families stealth replay
-
-# Held-out generalization: hold out entire tiers from training
-python -m rl_captcha.scripts.evaluate_ppo --agent rl_captcha/agent/checkpoints/ppo_run1 --episodes 500 --held-out-tiers 3 4
+# All 6 agents at once
+python -u -m rl_captcha.scripts.evaluate_ppo `
+    --agent ppo_noaug=rl_captcha/agent/checkpoints/ppo_noaug `
+            ppo_advaug=rl_captcha/agent/checkpoints/ppo_advaug `
+            dg_noaug=rl_captcha/agent/checkpoints/dg_noaug `
+            dg_advaug=rl_captcha/agent/checkpoints/dg_advaug `
+            soft_ppo_noaug=rl_captcha/agent/checkpoints/soft_ppo_noaug `
+            soft_ppo_advaug=rl_captcha/agent/checkpoints/soft_ppo_advaug `
+    --data-dir data/ --episodes 500 --split test `
+    2>&1 | Tee-Object -FilePath logs/eval_all.log
 ```
 
-Outputs per-agent: confusion matrix, accuracy, precision, recall, F1, outcome distribution, action distribution, **per-bot-family detection table**, **per-tier summary**, and a side-by-side comparison table when multiple agents are provided.
+```powershell
+# Single agent eval
+python -m rl_captcha.scripts.evaluate_ppo --agent rl_captcha/agent/checkpoints/ppo_noaug --episodes 500 --split test
+
+# Held-out generalization: hold out specific bot families
+python -m rl_captcha.scripts.evaluate_ppo --agent rl_captcha/agent/checkpoints/ppo_advaug --episodes 500 --held-out-families stealth replay
+
+# Held-out generalization: hold out entire tiers
+python -m rl_captcha.scripts.evaluate_ppo --agent rl_captcha/agent/checkpoints/ppo_advaug --episodes 500 --held-out-tiers 3 4
+```
 
 #### Tiered Adversarial Evaluation
 
@@ -236,16 +263,26 @@ The `--held-out-families` and `--held-out-tiers` flags let you test **generaliza
 | `--held-out-families` | `None` | Bot families to hold out from train/val (test-only) |
 | `--held-out-tiers` | `None` | Bot tiers to hold out from train/val (test-only) |
 
-### 4. Visualize
+### 5. Visualize
 
 ```powershell
 # Individual training plots (auto-detects DG/Soft PPO metrics)
-python -m rl_captcha.scripts.plot_training --log logs/ppo_training.log --out figures/ppo
-python -m rl_captcha.scripts.plot_training --log logs/dg_training.log --out figures/dg
-python -m rl_captcha.scripts.plot_training --log logs/soft_ppo_training.log --out figures/soft_ppo
+python -m rl_captcha.scripts.plot_training --log logs/ppo_noaug_training.log --out figures/ppo_noaug
+python -m rl_captcha.scripts.plot_training --log logs/ppo_advaug_training.log --out figures/ppo_advaug
+python -m rl_captcha.scripts.plot_training --log logs/dg_noaug_training.log --out figures/dg_noaug
+python -m rl_captcha.scripts.plot_training --log logs/dg_advaug_training.log --out figures/dg_advaug
+python -m rl_captcha.scripts.plot_training --log logs/soft_ppo_noaug_training.log --out figures/soft_ppo_noaug
+python -m rl_captcha.scripts.plot_training --log logs/soft_ppo_advaug_training.log --out figures/soft_ppo_advaug
 
-# Three-way comparison plots
-python -m rl_captcha.scripts.plot_comparison --logs ppo=logs/ppo_training.log dg=logs/dg_training.log soft_ppo=logs/soft_ppo_training.log --out figures/comparison
+# 6-way comparison plots (training curves + eval metrics)
+python -m rl_captcha.scripts.plot_comparison `
+    --logs ppo_noaug=logs/ppo_noaug_training.log `
+           ppo_advaug=logs/ppo_advaug_training.log `
+           dg_noaug=logs/dg_noaug_training.log `
+           dg_advaug=logs/dg_advaug_training.log `
+           soft_ppo_noaug=logs/soft_ppo_noaug_training.log `
+           soft_ppo_advaug=logs/soft_ppo_advaug_training.log `
+    --out figures/comparison
 
 # Evaluation result plots (run after evaluate step)
 python -m rl_captcha.scripts.plot_eval --log logs/eval_all.log --out figures/eval
@@ -265,7 +302,9 @@ python -m rl_captcha.scripts.plot_online --log online_training.log --out figures
 
 ## Data Augmentation
 
-During training, **bot sessions** are stochastically augmented (50% probability per episode) to prevent the agent from relying on trivially separable features. Human sessions are never augmented. Augmentation is **disabled** for the validation environment so val metrics reflect real data.
+### Standard Augmentation (per-episode)
+
+During training, **bot sessions** are stochastically augmented (50% probability per episode) to prevent the agent from relying on trivially separable features. Human sessions receive lighter perturbation. Augmentation is **disabled** for the validation environment so val metrics reflect real data.
 
 | Augmentation | Default | Effect |
 |-------------|---------|--------|
@@ -273,15 +312,19 @@ During training, **bot sessions** are stochastically augmented (50% probability 
 | Timing jitter | std=30ms | Gaussian noise on event timestamps |
 | Speed warp | 0.7x-1.4x | Random time stretch/compress across session |
 
-Configure in `EventEnvConfig`:
+### Adversarial Augmentation (pre-generated)
 
-```python
-augment: bool = True              # enable/disable
-augment_prob: float = 0.5         # probability per bot episode
-aug_position_noise_std: float = 15.0
-aug_timing_jitter_std: float = 30.0
-aug_speed_warp_range: tuple = (0.7, 1.4)
-```
+Uses the same pipeline as the classifier (Section 3.5.3, `classifier.augmentation`). Bot sessions are humanized at three difficulty levels to force the agent to learn deeper behavioral patterns:
+
+| Level | Key-hold fix | Mouse jitter | Timing compression | Path smoothing |
+|-------|-------------|-------------|-------------------|----------------|
+| **Easy** | Resample to human stats | std=3px | -- | -- |
+| **Medium** | Resample to human stats | std=2px | beta=0.7 (toward human rate) | alpha=0.8 (EMA) |
+| **Hard** | Resample to human stats | std=1px | beta=0.4 (stronger) | alpha=0.6 (stronger) |
+
+For each bot session, `n_copies_per_level` (default 2) augmented copies are generated at each level = 6 humanized copies per bot. The `HumanProfiler` learns the target distribution (key-hold mean/std, mouse timing, speed, jitter ratio, direction-change frequency) from real human sessions.
+
+Generated data is saved to `data/bot_augmented/` and loaded when `--adversarial-augment` is passed to the training script.
 
 ## Live Integration
 

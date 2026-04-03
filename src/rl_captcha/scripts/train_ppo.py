@@ -1,21 +1,40 @@
 """Train the PPO+LSTM, DG+LSTM, or Soft-PPO+LSTM event-level CAPTCHA agent.
 
-Usage:
+Usage (without adversarial augmentation):
     python -m rl_captcha.scripts.train_ppo \
         --data-dir data/ \
-        --save-path rl_captcha/agent/checkpoints/ppo_run1 \
+        --save-path rl_captcha/agent/checkpoints/ppo_noaug \
         --total-timesteps 500000
 
     python -m rl_captcha.scripts.train_ppo \
         --algorithm dg \
         --data-dir data/ \
-        --save-path rl_captcha/agent/checkpoints/dg_run1 \
+        --save-path rl_captcha/agent/checkpoints/dg_noaug \
         --total-timesteps 500000
 
     python -m rl_captcha.scripts.train_ppo \
         --algorithm soft_ppo \
         --data-dir data/ \
-        --save-path rl_captcha/agent/checkpoints/soft_ppo_run1 \
+        --save-path rl_captcha/agent/checkpoints/soft_ppo_noaug \
+        --total-timesteps 500000
+
+Usage (with adversarial augmentation):
+    python -m rl_captcha.scripts.train_ppo \
+        --adversarial-augment \
+        --data-dir data/ \
+        --save-path rl_captcha/agent/checkpoints/ppo_advaug \
+        --total-timesteps 500000
+
+    python -m rl_captcha.scripts.train_ppo \
+        --algorithm dg --adversarial-augment \
+        --data-dir data/ \
+        --save-path rl_captcha/agent/checkpoints/dg_advaug \
+        --total-timesteps 500000
+
+    python -m rl_captcha.scripts.train_ppo \
+        --algorithm soft_ppo --adversarial-augment \
+        --data-dir data/ \
+        --save-path rl_captcha/agent/checkpoints/soft_ppo_advaug \
         --total-timesteps 500000
 """
 
@@ -41,7 +60,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--data-dir", type=str, default="data/",
                     help="Path to data directory with human/ and bot/ subdirs")
     p.add_argument("--save-path", type=str,
-                    default="rl_captcha/agent/checkpoints/ppo_run1",
+                    default="rl_captcha/agent/checkpoints/ppo_noaug",
                     help="Directory to save checkpoints")
     p.add_argument("--total-timesteps", type=int, default=None,
                     help="Override total timesteps (default from PPOConfig)")
@@ -70,6 +89,10 @@ def parse_args() -> argparse.Namespace:
                     help="Soft PPO target entropy as fraction of max entropy (default: 0.5)")
     p.add_argument("--alpha-lr", type=float, default=3e-4,
                     help="Soft PPO entropy temperature learning rate (default: 3e-4)")
+    # Adversarial augmentation (pre-generated humanized bot sessions)
+    p.add_argument("--adversarial-augment", action="store_true",
+                    help="Include pre-generated adversarially augmented bot sessions "
+                         "from data/bot_augmented/ (run generate_augmented_data.py first)")
     # Held-out family evaluation
     p.add_argument("--held-out-families", type=str, nargs="*", default=None,
                     help="Bot families to hold out from training (e.g. stealth replay)")
@@ -95,9 +118,9 @@ def main():
     if args.fp_penalty is not None:
         cfg.event_env.penalty_false_positive = args.fp_penalty
 
-    # Load data
+    # Load data (include augmented bot sessions when --adversarial-augment is on)
     print(f"Loading sessions from {args.data_dir}...")
-    sessions = load_from_directory(args.data_dir)
+    sessions = load_from_directory(args.data_dir, include_augmented=args.adversarial_augment)
     human_count, bot_count = _label_counts(sessions)
     print(f"  Loaded {len(sessions)} sessions ({human_count} human, {bot_count} bot)")
 
@@ -172,6 +195,10 @@ def main():
     print(f"  Device: {agent.device}")
     print(f"  Rollout steps: {cfg.ppo.rollout_steps}")
     print(f"  Total timesteps: {cfg.ppo.total_timesteps}")
+    if args.adversarial_augment:
+        print(f"  Adversarial augmentation: ON (augmented bot sessions loaded from data/bot_augmented/)")
+    else:
+        print(f"  Adversarial augmentation: OFF")
     print()
 
     total_steps = 0
@@ -251,7 +278,7 @@ def _quick_validate(env: EventEnv, agent: PPOLSTM, num_episodes: int) -> float:
             action_mask = step_info.get("action_mask")
 
         outcome = step_info.get("outcome", "")
-        if outcome in ("correct_block", "bot_blocked_puzzle", "correct_allow"):
+        if outcome in ("correct_block", "bot_blocked_puzzle", "correct_allow", "human_passed_puzzle"):
             correct += 1
         total += 1
 

@@ -2,15 +2,18 @@
 
 Usage (single agent):
     python -m rl_captcha.scripts.evaluate_ppo \
-        --agent rl_captcha/agent/checkpoints/ppo_run1 \
+        --agent rl_captcha/agent/checkpoints/ppo_noaug \
         --data-dir data/ \
         --episodes 500
 
-Usage (all three at once):
+Usage (all six — with and without adversarial augmentation):
     python -m rl_captcha.scripts.evaluate_ppo \
-        --agent ppo=rl_captcha/agent/checkpoints/ppo_run1 \
-               dg=rl_captcha/agent/checkpoints/dg_run1 \
-               soft_ppo=rl_captcha/agent/checkpoints/soft_ppo_run1 \
+        --agent ppo_noaug=rl_captcha/agent/checkpoints/ppo_noaug \
+               ppo_advaug=rl_captcha/agent/checkpoints/ppo_advaug \
+               dg_noaug=rl_captcha/agent/checkpoints/dg_noaug \
+               dg_advaug=rl_captcha/agent/checkpoints/dg_advaug \
+               soft_ppo_noaug=rl_captcha/agent/checkpoints/soft_ppo_noaug \
+               soft_ppo_advaug=rl_captcha/agent/checkpoints/soft_ppo_advaug \
         --episodes 500
 
 By default, evaluation uses the held-out TEST split (15% of data) with
@@ -50,6 +53,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--split-seed", type=int, default=42,
                     help="Random seed for split (must match training)")
     p.add_argument("--device", type=str, default="auto")
+    p.add_argument("--eval-seeds", type=int, nargs="+", default=None,
+                    help="Run evaluation with multiple RNG seeds and report "
+                         "mean +/- std (e.g. --eval-seeds 42 123 456 789 1024)")
     p.add_argument("--held-out-families", type=str, nargs="*", default=None,
                     help="Bot families to hold out from train/val (test-only)")
     p.add_argument("--held-out-tiers", type=int, nargs="*", default=None,
@@ -78,9 +84,14 @@ def _parse_agent_specs(agent_args: list[str]) -> list[tuple[str, str]]:
 
 
 def _create_agent(name: str, cfg: Config, device: str) -> PPOLSTM:
-    """Instantiate the correct agent class based on the agent name."""
+    """Instantiate the correct agent class based on the agent name.
+
+    Handles both old-style names (ppo, dg, soft_ppo) and new augmentation-
+    aware names (ppo_noaug, ppo_advaug, dg_noaug, dg_advaug, etc.).
+    """
     kwargs = dict(obs_dim=cfg.event_env.event_dim, action_dim=7, device=device)
-    algo = name.lower()
+    # Strip augmentation suffixes to get the base algorithm
+    algo = name.lower().replace("_noaug", "").replace("_advaug", "")
     if algo == "dg":
         return DGLSTM(config=DGConfig(), **kwargs)
     elif algo == "soft_ppo":
@@ -136,13 +147,19 @@ def main():
 
     # Parse agent specs
     agent_specs = _parse_agent_specs(args.agent)
+    eval_seeds = args.eval_seeds or [42]
+    multi_seed = len(eval_seeds) > 1
+
     print(f"\n  Evaluating {len(agent_specs)} agent(s): "
           f"{', '.join(name for name, _ in agent_specs)}")
     print(f"  Episodes per agent: {args.episodes}")
+    if multi_seed:
+        print(f"  Eval seeds: {eval_seeds} ({len(eval_seeds)} runs per agent)")
     print()
 
     # Evaluate each agent
     all_results = {}
+    all_multi_seed_metrics = {}  # name -> list of metric dicts (one per seed)
     for name, path in agent_specs:
         print(f"{'=' * 60}")
         print(f"  Loading agent: {name} ({path})")
@@ -151,14 +168,36 @@ def main():
         print(f"  Device: {agent.device}")
         print()
 
-        results = _run_evaluation(env, agent, args.episodes, agent_name=name)
-        all_results[name] = results
-        _print_results(results, agent_name=name, split_name=args.split)
-        _print_per_family_results(results, agent_name=name)
+        if multi_seed:
+            seed_metrics = []
+            combined_episodes = []
+            for seed in eval_seeds:
+                results = _run_evaluation(env, agent, args.episodes,
+                                          agent_name=f"{name}/seed={seed}",
+                                          eval_seed=seed)
+                combined_episodes.extend(results["episodes"])
+                seed_metrics.append(_compute_metrics(results["episodes"]))
+
+            # Print per-seed results, then aggregated
+            all_results[name] = {"episodes": combined_episodes}
+            all_multi_seed_metrics[name] = seed_metrics
+            _print_results({"episodes": combined_episodes}, agent_name=name,
+                           split_name=args.split)
+            _print_per_family_results({"episodes": combined_episodes}, agent_name=name)
+        else:
+            results = _run_evaluation(env, agent, args.episodes, agent_name=name,
+                                      eval_seed=eval_seeds[0])
+            all_results[name] = results
+            _print_results(results, agent_name=name, split_name=args.split)
+            _print_per_family_results(results, agent_name=name)
 
     # Print comparison table if multiple agents
     if len(all_results) > 1:
         _print_comparison(all_results, split_name=args.split)
+
+    # Print aggregated multi-seed summary
+    if multi_seed and all_multi_seed_metrics:
+        _print_multi_seed_summary(all_multi_seed_metrics, eval_seeds, args.split)
 
 
 def _run_evaluation(
@@ -246,7 +285,8 @@ def _compute_metrics(episodes: list[dict]) -> dict:
 
     tp = sum(1 for e in episodes if e["true_label"] == 0 and e["outcome"] in
              ("correct_block", "bot_blocked_puzzle"))
-    tn = sum(1 for e in episodes if e["true_label"] == 1 and e["outcome"] == "correct_allow")
+    tn = sum(1 for e in episodes if e["true_label"] == 1 and e["outcome"] in
+             ("correct_allow", "human_passed_puzzle"))
     fp = sum(1 for e in episodes if e["true_label"] == 1 and e["outcome"] in
              ("false_positive_block", "fp_puzzle"))
     fn = sum(1 for e in episodes if e["true_label"] == 0 and e["outcome"] in
@@ -434,6 +474,59 @@ def _print_comparison(all_results: dict[str, dict], split_name: str = "test"):
     print(f"  Best accuracy: {best_acc} ({metrics[best_acc]['accuracy']:.3f})")
     print(f"  Best F1:       {best_f1} ({metrics[best_f1]['f1']:.3f})")
     print(f"  Best reward:   {best_reward} ({metrics[best_reward]['avg_reward']:.3f})")
+    print()
+
+
+def _print_multi_seed_summary(
+    all_metrics: dict[str, list[dict]],
+    seeds: list[int],
+    split_name: str = "test",
+):
+    """Print mean +/- std across multiple eval seeds for each agent."""
+    print()
+    print("=" * 80)
+    print(f"  MULTI-SEED AGGREGATED RESULTS — {split_name.upper()} split "
+          f"({len(seeds)} seeds: {seeds})")
+    print("=" * 80)
+
+    names = list(all_metrics.keys())
+    col_w = max(18, max(len(n) for n in names) + 2)
+    header = f"  {'Metric':<20s}" + "".join(f"{n:>{col_w}s}" for n in names)
+    print(header)
+    print("  " + "-" * (20 + col_w * len(names)))
+
+    rows = [
+        ("Accuracy",  "accuracy"),
+        ("Precision",  "precision"),
+        ("Recall",     "recall"),
+        ("F1",         "f1"),
+        ("Avg Reward", "avg_reward"),
+    ]
+
+    for label, key in rows:
+        row = f"  {label:<20s}"
+        for name in names:
+            values = [m[key] for m in all_metrics[name]]
+            mean = np.mean(values)
+            std = np.std(values)
+            row += f"{mean:>{col_w - 8}.3f} +/- {std:<.3f}"
+        print(row)
+
+    print()
+
+    # Per-seed breakdown
+    print(f"  {'':20s}", end="")
+    for name in names:
+        print(f"{name:>{col_w}s}", end="")
+    print()
+    print("  " + "-" * (20 + col_w * len(names)))
+    for i, seed in enumerate(seeds):
+        row = f"  {'Seed ' + str(seed):<20s}"
+        for name in names:
+            acc = all_metrics[name][i]["accuracy"]
+            f1 = all_metrics[name][i]["f1"]
+            row += f"{'acc=' + f'{acc:.3f}' + ' f1=' + f'{f1:.3f}':>{col_w}s}"
+        print(row)
     print()
 
 

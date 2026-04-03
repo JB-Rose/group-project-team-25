@@ -65,6 +65,7 @@ BOT_TIER: dict[str, int] = {
     "linear": 1, "tabber": 1, "speedrun": 1,
     "scripted": 2, "stealth": 2, "slow": 2, "erratic": 2, "replay": 2,
     "semi_auto": 3, "trace_conditioned": 4,
+    "llm": 5,
 }
 
 # Realistic fake identities for varied runs

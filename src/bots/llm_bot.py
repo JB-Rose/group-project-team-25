@@ -186,6 +186,7 @@ def save_telemetry_json(session_id: str, raw: dict, run_index: int) -> Path:
         "exportedAt": datetime.now(timezone.utc).isoformat(),
         "source": "live_confirm",
         "bot_type": "llm",
+        "tier": 5,
         "segments": [{
             "mouse": mouse,
             "clicks": clicks,
