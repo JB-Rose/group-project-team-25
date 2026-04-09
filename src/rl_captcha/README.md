@@ -1,246 +1,189 @@
 # RL CAPTCHA System
 
-A reinforcement learning-based bot detection system that processes raw user telemetry using a PPO+LSTM agent. Events are grouped into **windows of 30** and encoded as statistical feature vectors (speed variance, timing regularity, path curvature, etc.). The 2-layer LSTM accumulates evidence across all windows, then makes a terminal decision on the **final window** only.
+Reinforcement learning-based bot detection using an LSTM agent. Processes raw user telemetry (mouse, clicks, keystrokes, scrolls) in windows of 30 events and makes a terminal decision (allow, block, or puzzle).
 
-This package is fully standalone and does not import from TicketMonarch.
+Three algorithms are supported: **PPO**, **DG** (Delightful Gradients), and **Soft PPO** (adaptive entropy). All share the same LSTM network and environment.
 
-## Architecture
-
-```
-Raw telemetry events (mouse, click, keystroke, scroll)
-        |
-        v
-Windowed Event Encoder (26-dim feature vector per 30-event window)
-        |  Features: speed mean/var, path curvature, click/key timing,
-        |  spatial diversity, scroll behavior, interaction quality
-        |
-        v
-LSTM (256 hidden, 2 layers, dropout 0.1) -- accumulates evidence over windows
-        |
-        |--> Actor head (256 -> 128 -> 64 -> 7 logits) --> action
-        +--> Critic head (256 -> 128 -> 64 -> 1 value) --> V(s)
-```
-
-### Two-Phase Episode Structure with Action Masking
-
-Episodes have two distinct phases enforced by **action masking** (invalid actions get `-inf` logits):
-
-1. **Observation phase** (all non-final windows): Only actions 0-1 are valid
-   - The LSTM processes windows and accumulates evidence
-   - Agent can deploy honeypots to gather more information
-
-2. **Decision phase** (final window only): Only actions 2-6 are valid
-   - The agent must make a terminal decision based on all accumulated evidence
-   - No more observing -- must choose: puzzle, allow, or block
-
-This ensures the agent always processes the **entire session** before deciding, preventing shortcut strategies where it decides on window 1.
-
-### Windowed Observation Encoding (26 dimensions)
-
-| Dims | Feature | Discriminative power |
-|------|---------|---------------------|
-| 0-3 | Event type ratios (mouse/click/key/scroll) | Bot profiles have different event mixes |
-| 4-6 | Mouse speed: mean, variance, acceleration | Bots have low speed variance |
-| 7 | Path curvature (path length / displacement) | Bots move in straight lines (~1.0) |
-| 8-10 | Inter-event timing: mean, variance, min | Bots have near-zero timing variance |
-| 11-12 | Click timing: mean interval, variance | Bots click at regular intervals |
-| 13-14 | Keystroke hold: mean duration, variance | Bots have mechanical uniform holds |
-| 15-16 | Key-press interval: mean, variance | Typing rhythm regularity |
-| 17-18 | Scroll: total distance, direction changes | Bots rarely scroll organically |
-| 19-22 | Spatial: unique positions, x/y range | Bots visit fewer screen areas |
-| 23 | Interactive click ratio | Bots may click non-interactive areas |
-| 24 | Window duration (log-normalized) | Time span of the window |
-| 25 | Event count / window size | How full the window is |
-
-### Action Space (7 actions)
-
-| Index | Action | Phase | Description |
-|-------|--------|-------|-------------|
-| 0 | `continue` | Observation | Keep watching (masked on final window) |
-| 1 | `deploy_honeypot` | Observation | Deploy invisible trap (masked on final window) |
-| 2 | `easy_puzzle` | Decision | 95% human pass, 40% bot pass (masked on non-final) |
-| 3 | `medium_puzzle` | Decision | 85% human pass, 15% bot pass (masked on non-final) |
-| 4 | `hard_puzzle` | Decision | 70% human pass, 5% bot pass (masked on non-final) |
-| 5 | `allow` | Decision | Let user through (masked on non-final) |
-| 6 | `block` | Decision | Block user (masked on non-final) |
-
-### Reward Structure
-
-| Outcome | Reward |
-|---------|--------|
-| Correctly allow human | +0.5 |
-| Correctly block/puzzle bot | +1.0 |
-| False positive (challenge human) | -1.0 |
-| False negative (allow bot) | -0.8 |
-| Honeypot catches bot | +0.3 |
-| Per-window continue penalty | -0.001 |
-
-## Project Structure
-
-```
-rl_captcha/
-├── config.py                    # EventEnvConfig, PPOConfig, DBConfig
-├── requirements.txt             # torch, gymnasium, numpy, scikit-learn
-│
-├── data/
-│   └── loader.py                # Session dataclass, load_from_directory()
-│                                # Supports: chrome extension, live_confirm, flat JSON
-│
-├── environment/
-│   └── event_env.py             # Windowed Gymnasium env (26-dim obs, 7 actions)
-│                                # EventEncoder + action masking + bot data augmentation
-│
-├── agent/
-│   ├── ppo_lstm.py              # PPO algorithm with LSTM recurrence + action masks
-│   ├── lstm_networks.py         # LSTMActorCritic (2-layer LSTM, 256 hidden)
-│   ├── rollout_buffer.py        # On-policy buffer with GAE + mask storage
-│   └── checkpoints/
-│       └── ppo_run1/            # Trained model weights
-│
-└── scripts/
-    ├── train_ppo.py             # Train PPO+LSTM agent
-    ├── evaluate_ppo.py          # Evaluate (confusion matrix, F1, action distribution)
-    ├── plot_training.py         # Visualize training.log
-    ├── plot_eval.py             # Visualize evaluation results
-    └── plot_online.py           # Visualize online_training.log
-```
+---
 
 ## Setup
 
-```bash
-pip install -r rl_captcha/requirements.txt
-```
-
-Dependencies: PyTorch, Gymnasium, NumPy, scikit-learn, matplotlib.
-
-## Data
-
-Training data lives in `data/human/` (label=1) and `data/bot/` (label=0). All events from a session are used (no truncation). Data is split 70/15/15 (train/val/test) with stratified sampling.
-
-**Supported file formats:**
-- `session_*.json` -- Live-confirm format from Dev Dashboard: `{ "sessionId": "...", "segments": [{ "mouse": [...], ... }] }`
-- `telemetry_*.json` -- Chrome extension export: `{ "<sessionId>": { "segments": [...], "pageMeta": [...] } }`
-
-**Important:** Only include data from the TicketMonarch site (localhost). Data from external sites will pollute the training distribution.
-
-## Training
-
 All commands from the `src/` directory.
 
-### 1. Collect Data
-
-**Human data:** Browse the live site normally. Sessions are auto-saved to `data/human/` when online learning runs via the `/api/agent/confirm` endpoint.
-
-**Bot data:** Run bots against the live site:
 ```bash
-python bots/selenium_bot.py --runs 10 --type scripted
-python bots/llm_bot.py --runs 3 --provider anthropic
+pip install -r rl_captcha/requirements.txt
+mkdir -p logs figures
 ```
 
-### 2. Train
+---
 
-```bash
-python -u -m rl_captcha.scripts.train_ppo \
-    --data-dir data/ \
-    --save-path rl_captcha/agent/checkpoints/ppo_run1 \
-    --total-timesteps 500000 \
-    --val-episodes 100 \
-    2>&1 | Tee-Object -FilePath training.log
+## Training Data
+
+Training data lives in:
+- `data/human/` — human sessions (label=1)
+- `data/bot/` — bot sessions (label=0)
+- `data/bot_augmented/` — augmented bot sessions (generated from bot data)
+
+**Collect human data:** Browse the live site normally. Sessions auto-save to `data/human/` when confirmed.
+
+**Collect bot data:** Run bots against the live site (see [bots/README.md](../bots/README.md)).
+
+---
+
+## Step 1: Generate Augmented Data
+
+Run this once (or re-run when source data changes):
+
+```powershell
+python -u -m rl_captcha.scripts.generate_augmented_data --data-dir data/ --n-copies 2 --seed 42 2>&1 | Tee-Object -FilePath logs/generate_augmented.log
 ```
 
-Saves checkpoint to `rl_captcha/agent/checkpoints/ppo_run1/`.
+---
 
-#### Training CLI Flags
+## Step 2: Train
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--data-dir` | `data/` | Root directory containing `human/` and `bot/` subdirectories |
-| `--save-path` | `rl_captcha/agent/checkpoints/ppo_run1` | Where to save model checkpoints |
-| `--total-timesteps` | `500000` (from PPOConfig) | Total environment steps to train for |
-| `--log-interval` | `1` | Print stats every N rollouts |
-| `--save-interval` | `10` | Save checkpoint + run validation every N rollouts |
-| `--val-episodes` | `100` | Number of validation episodes per checkpoint |
-| `--device` | `auto` | Compute device: `auto`, `cuda`, or `cpu` |
-| `--split-seed` | `42` | Random seed for train/val/test split |
+Each algorithm can be trained with or without adversarial augmentation (6 checkpoints total).
 
-### 3. Evaluate
+### Without augmentation (baseline)
 
-```bash
-python -m rl_captcha.scripts.evaluate_ppo \
-    --agent rl_captcha/agent/checkpoints/ppo_run1 \
-    --data-dir data/ \
-    --episodes 500 \
-    --split test
+```powershell
+python -u -m rl_captcha.scripts.train_ppo --algorithm ppo --data-dir data/ --save-path rl_captcha/agent/checkpoints/ppo_noaug --total-timesteps 500000 2>&1 | Tee-Object -FilePath logs/ppo_noaug_training.log
+
+python -u -m rl_captcha.scripts.train_ppo --algorithm dg --data-dir data/ --save-path rl_captcha/agent/checkpoints/dg_noaug --total-timesteps 500000 2>&1 | Tee-Object -FilePath logs/dg_noaug_training.log
+
+python -u -m rl_captcha.scripts.train_ppo --algorithm soft_ppo --data-dir data/ --save-path rl_captcha/agent/checkpoints/soft_ppo_noaug --total-timesteps 500000 --target-entropy-ratio 0.5 2>&1 | Tee-Object -FilePath logs/soft_ppo_noaug_training.log
 ```
 
-Outputs confusion matrix, accuracy, precision, recall, F1 score, outcome distribution, and action distribution.
+### With adversarial augmentation
 
-#### Evaluation CLI Flags
+```powershell
+python -u -m rl_captcha.scripts.train_ppo --algorithm ppo --adversarial-augment --data-dir data/ --save-path rl_captcha/agent/checkpoints/ppo_advaug --total-timesteps 500000 2>&1 | Tee-Object -FilePath logs/ppo_advaug_training.log
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--agent` | *(required)* | Path to checkpoint directory |
+python -u -m rl_captcha.scripts.train_ppo --algorithm dg --adversarial-augment --data-dir data/ --save-path rl_captcha/agent/checkpoints/dg_advaug --total-timesteps 500000 2>&1 | Tee-Object -FilePath logs/dg_advaug_training.log
+
+python -u -m rl_captcha.scripts.train_ppo --algorithm soft_ppo --adversarial-augment --data-dir data/ --save-path rl_captcha/agent/checkpoints/soft_ppo_advaug --total-timesteps 500000 --target-entropy-ratio 0.5 2>&1 | Tee-Object -FilePath logs/soft_ppo_advaug_training.log
+```
+
+### Training Flags
+
+| Flag | Default | What it does |
+|------|---------|--------------|
+| `--algorithm` | `ppo` | Algorithm: `ppo`, `dg`, or `soft_ppo` |
+| `--adversarial-augment` | off | Include augmented bot data from `data/bot_augmented/` |
 | `--data-dir` | `data/` | Root data directory |
-| `--episodes` | `500` | Number of episodes to evaluate |
-| `--split` | `test` | Data split to evaluate on: `test`, `val`, `train`, or `all` |
-| `--split-seed` | `42` | Random seed for split (must match training) |
-| `--device` | `auto` | Compute device: `auto`, `cuda`, or `cpu` |
+| `--save-path` | `rl_captcha/agent/checkpoints/ppo_noaug` | Where to save checkpoints |
+| `--total-timesteps` | `500000` | Total training steps |
+| `--val-episodes` | `100` | Validation episodes per checkpoint |
+| `--save-interval` | `10` | Save checkpoint every N rollouts |
+| `--device` | `auto` | `auto`, `cuda`, or `cpu` |
+| `--split-seed` | `42` | Random seed for data split |
+| `--target-entropy-ratio` | `0.5` | Target entropy (Soft PPO only) |
 
-### 4. Visualize
+---
 
-```bash
-# Plot training curves from training.log
-python -m rl_captcha.scripts.plot_training --log training.log --out figures/
+## Step 3: Evaluate
 
-# Plot evaluation results (pipe evaluate output to a file first)
-python -m rl_captcha.scripts.evaluate_ppo --agent ... --data-dir data/ 2>&1 | Tee-Object -FilePath eval.log
-python -m rl_captcha.scripts.plot_eval --log eval.log --out figures/
+### Single agent
+```powershell
+python -u -m rl_captcha.scripts.evaluate_ppo --agent rl_captcha/agent/checkpoints/ppo_noaug --data-dir data/ --episodes 500 --split test 2>&1 | Tee-Object -FilePath logs/eval_ppo_noaug.log
+```
 
-# Plot online learning log
+### All 6 agents at once
+```powershell
+python -u -m rl_captcha.scripts.evaluate_ppo `
+    --agent ppo_noaug=rl_captcha/agent/checkpoints/ppo_noaug `
+            ppo_advaug=rl_captcha/agent/checkpoints/ppo_advaug `
+            dg_noaug=rl_captcha/agent/checkpoints/dg_noaug `
+            dg_advaug=rl_captcha/agent/checkpoints/dg_advaug `
+            soft_ppo_noaug=rl_captcha/agent/checkpoints/soft_ppo_noaug `
+            soft_ppo_advaug=rl_captcha/agent/checkpoints/soft_ppo_advaug `
+    --data-dir data/ --episodes 500 --split test `
+    2>&1 | Tee-Object -FilePath logs/eval_all.log
+```
+
+### Held-out generalization tests
+```powershell
+# Hold out specific bot families from training
+python -m rl_captcha.scripts.evaluate_ppo --agent rl_captcha/agent/checkpoints/ppo_advaug --episodes 500 --held-out-families stealth replay
+
+# Hold out entire tiers
+python -m rl_captcha.scripts.evaluate_ppo --agent rl_captcha/agent/checkpoints/ppo_advaug --episodes 500 --held-out-tiers 3 4
+```
+
+### Evaluation Flags
+
+| Flag | Default | What it does |
+|------|---------|--------------|
+| `--agent` | *(required)* | Checkpoint path(s). Use `name=path` for multi-agent |
+| `--data-dir` | `data/` | Root data directory |
+| `--episodes` | `500` | Episodes to evaluate per agent |
+| `--split` | `test` | Data split: `test`, `val`, `train`, or `all` |
+| `--split-seed` | `42` | Must match training seed |
+| `--device` | `auto` | `auto`, `cuda`, or `cpu` |
+| `--held-out-families` | none | Bot families to exclude from train/val |
+| `--held-out-tiers` | none | Bot tiers to exclude from train/val |
+
+---
+
+## Step 4: Plot
+
+### Individual training curves
+```powershell
+python -m rl_captcha.scripts.plot_training --log logs/ppo_noaug_training.log --out figures/ppo_noaug
+python -m rl_captcha.scripts.plot_training --log logs/dg_noaug_training.log --out figures/dg_noaug
+python -m rl_captcha.scripts.plot_training --log logs/soft_ppo_noaug_training.log --out figures/soft_ppo_noaug
+```
+
+### 6-way comparison
+```powershell
+python -m rl_captcha.scripts.plot_comparison `
+    --logs ppo_noaug=logs/ppo_noaug_training.log `
+           ppo_advaug=logs/ppo_advaug_training.log `
+           dg_noaug=logs/dg_noaug_training.log `
+           dg_advaug=logs/dg_advaug_training.log `
+           soft_ppo_noaug=logs/soft_ppo_noaug_training.log `
+           soft_ppo_advaug=logs/soft_ppo_advaug_training.log `
+    --out figures/comparison
+```
+
+### Evaluation plots
+```powershell
+# Without augmented test set
+python -m rl_captcha.scripts.plot_eval --log logs/eval_all.log --out figures/eval
+
+# With augmented test set label
+python -m rl_captcha.scripts.plot_eval --log logs/eval_all.log --out figures/eval_aug --augmented
+```
+
+### Online learning
+```powershell
 python -m rl_captcha.scripts.plot_online --log online_training.log --out figures/
 ```
 
-#### Plot CLI Flags
+### Plot Flags
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--log` | `training.log` (plot_training) / *required* (plot_eval) | Path to log file |
-| `--out` | `figures` | Output directory for figures |
+| Flag | Default | What it does |
+|------|---------|--------------|
+| `--log` | *(required)* | Path to log file |
+| `--logs` | *(required for comparison)* | Training logs as `name=path` pairs |
+| `--out` | `figures` | Output directory |
 | `--format` | `png` | Output format: `png`, `pdf`, or `svg` |
+| `--augmented` | off | Label plots as "Augmented Test Set" (plot_eval only) |
 
-## Data Augmentation
+---
 
-During training, **bot sessions** are stochastically augmented (50% probability per episode) to prevent the agent from relying on trivially separable features. Human sessions are never augmented. Augmentation is **disabled** for the validation environment so val metrics reflect real data.
+## Bot Tier System
 
-| Augmentation | Default | Effect |
-|-------------|---------|--------|
-| Position noise | std=15px | Gaussian jitter on x/y coordinates |
-| Timing jitter | std=30ms | Gaussian noise on event timestamps |
-| Speed warp | 0.7x-1.4x | Random time stretch/compress across session |
+| Tier | Name | Bot Types |
+|------|------|-----------|
+| 1 | Commodity | linear, tabber, speedrun |
+| 2 | Careful Automation | scripted, stealth, slow, erratic, replay |
+| 3 | Semi-Automated | semi_auto |
+| 4 | Trace-Conditioned | trace_conditioned |
+| 5 | LLM-Powered | llm (Claude, GPT-4o) |
 
-Configure in `EventEnvConfig`:
-
-```python
-augment: bool = True              # enable/disable
-augment_prob: float = 0.5         # probability per bot episode
-aug_position_noise_std: float = 15.0
-aug_timing_jitter_std: float = 30.0
-aug_speed_warp_range: tuple = (0.7, 1.4)
-```
+---
 
 ## Live Integration
 
-The trained agent is loaded by `TicketMonarch/backend/agent_service.py` for real-time use:
-
-- **`evaluate_session()`** -- Full evaluation with action masking: processes all windows through LSTM, applies observation mask on non-final windows and decision mask on the final window
-- **`rolling_evaluate()`** -- Lightweight polling: returns bot probability from the final window's action distribution
-- **`online_learn()`** -- PPO update after confirmed human/bot sessions (3 epochs, 60% learning rate) with proper action masking. Logs before/after comparison to `online_training.log`
-
-All methods are thread-safe (wrapped with `threading.Lock`). Online and offline evaluation use identical action masking logic.
-
-## Configuration
-
-All hyperparameters in `config.py`:
-
-- **EventEnvConfig** -- Window size (30 events), obs dim (26), min events (10), reward weights, puzzle pass rates, action masking, normalization constants, data augmentation
-- **PPOConfig** -- Learning rate (3e-4), gamma (0.99), GAE lambda (0.95), clip ratio (0.2), entropy coefficient (0.01), LSTM (256 hidden, 2 layers)
+The trained agent is loaded by `TicketMonarch/backend/agent_service.py`. Set `RL_ALGORITHM` env var to select the algorithm (`ppo`, `dg`, or `soft_ppo`).

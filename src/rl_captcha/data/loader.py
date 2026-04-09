@@ -1,4 +1,4 @@
-"""Unified data loading from MySQL, Chrome extension JSON exports, and webapp CSV exports."""
+"""Unified data loading from MySQL, JSON exports, and webapp CSV exports."""
 
 from __future__ import annotations
 
@@ -11,6 +11,59 @@ from typing import Any
 import mysql.connector
 
 from rl_captcha.config import DBConfig
+
+
+# ---------------------------------------------------------------------------
+# Bot type → adversarial tier mapping
+# ---------------------------------------------------------------------------
+
+BOT_TYPE_TO_TIER: dict[str, int] = {
+    # Tier 1 — Commodity: obviously robotic, easy to detect
+    "linear": 1,
+    "tabber": 1,
+    "speedrun": 1,
+    # Tier 2 — Careful automation: more sophisticated behavioral mimicry
+    "scripted": 2,
+    "stealth": 2,
+    "slow": 2,
+    "erratic": 2,
+    "replay": 2,
+    # Tier 3 — Semi-automated: bot handles some steps, human handles others
+    "semi_auto": 3,
+    # Tier 4 — Trace-conditioned: bot replays/perturbs real human traces
+    "trace_conditioned": 4,
+    # Tier 5 — LLM-powered: autonomous AI agent navigating via browser-use
+    "llm": 5,
+}
+
+TIER_NAMES: dict[int, str] = {
+    1: "Commodity",
+    2: "Careful Automation",
+    3: "Semi-Automated",
+    4: "Trace-Conditioned",
+    5: "LLM-Powered",
+}
+
+
+def bot_type_to_tier(bot_type: str | None) -> int:
+    """Map a bot_type string to its adversarial tier. Unknown types → 0."""
+    if bot_type is None:
+        return 0
+    return BOT_TYPE_TO_TIER.get(bot_type, 0)
+
+
+def _is_augmented(session: Session) -> bool:
+    """Return True if the session is an adversarially augmented copy."""
+    if session.metadata.get("augmented"):
+        return True
+    return "_aug_" in session.session_id
+
+
+def _base_session_id(session: Session) -> str:
+    """Extract the source session ID, stripping ``_aug_*`` suffixes."""
+    sid = session.session_id
+    idx = sid.find("_aug_")
+    return sid[:idx] if idx != -1 else sid
 
 
 @dataclass
@@ -87,54 +140,6 @@ def load_from_mysql(
 
 
 # ---------------------------------------------------------------------------
-# Chrome extension JSON export loader
-# ---------------------------------------------------------------------------
-
-def load_from_json(
-    path: str | Path,
-    label: int | None = 1,
-) -> list[Session]:
-    """Load sessions from a Chrome extension JSON export.
-
-    The export format has top-level keys = session IDs, each containing
-    ``segments`` (list of telemetry batches) and ``pageMeta``.
-    """
-    path = Path(path)
-    with open(path, "r", encoding="utf-8") as f:
-        data: dict[str, Any] = json.load(f)
-
-    sessions: list[Session] = []
-    for sid, session_data in data.items():
-        # Merge all segments into flat lists
-        mouse: list[dict] = []
-        clicks: list[dict] = []
-        keystrokes: list[dict] = []
-        scroll: list[dict] = []
-
-        for seg in session_data.get("segments", []):
-            mouse.extend(seg.get("mouse", []))
-            clicks.extend(seg.get("clicks", []))
-            keystrokes.extend(seg.get("keystrokes", []))
-            scroll.extend(seg.get("scroll", []))
-
-        sessions.append(
-            Session(
-                session_id=sid,
-                label=label,
-                mouse=mouse,
-                clicks=clicks,
-                keystrokes=keystrokes,
-                scroll=scroll,
-                metadata={
-                    "source": "chrome_extension",
-                    "page_meta": session_data.get("pageMeta", []),
-                },
-            )
-        )
-    return sessions
-
-
-# ---------------------------------------------------------------------------
 # Webapp CSV export loader
 # ---------------------------------------------------------------------------
 
@@ -172,19 +177,30 @@ def load_from_csv(
 
 def load_from_directory(
     data_dir: str | Path,
+    include_augmented: bool = False,
 ) -> list[Session]:
     """Load all sessions from the standard data directory layout.
 
     Expected structure:
         data_dir/
-        ├── human/   ← Chrome extension exports (label=1)
-        └── bot/     ← External bot data (label=0)
+        ├── human/          ← Human session exports (label=1)
+        ├── bot/            ← External bot data (label=0)
+        └── bot_augmented/  ← Adversarially augmented bot data (label=0)
 
-    ``human/*.json`` files use the Chrome extension export format (dict keyed
-    by session ID).
+    ``human/*.json`` files use the live-confirm format (single session with segments).
     ``bot/*.json`` files use either:
-      - Chrome extension format (dict keyed by session ID), or
+      - Live-confirm format (single session with segments), or
       - Flat array format (list of session objects with ``session_id``).
+
+    Parameters
+    ----------
+    data_dir : str | Path
+        Root data directory.
+    include_augmented : bool
+        If True, also load adversarially augmented bot sessions from
+        ``bot_augmented/``.  These are pre-generated by
+        ``generate_augmented_data.py`` using the same pipeline as the
+        classifier (Section 3.5.3).
     """
     data_dir = Path(data_dir)
     sessions: list[Session] = []
@@ -206,11 +222,26 @@ def load_from_directory(
             except Exception as e:
                 print(f"Warning: skipping {f} — {e}")
 
+    if include_augmented:
+        aug_dir = data_dir / "bot_augmented"
+        if aug_dir.is_dir():
+            aug_count = 0
+            for f in sorted(aug_dir.glob("*.json")):
+                try:
+                    sessions.extend(_load_flexible_json(f, label=0))
+                    aug_count += 1
+                except Exception as e:
+                    print(f"Warning: skipping {f} — {e}")
+            print(f"  Loaded {aug_count} augmented bot files from {aug_dir}/")
+        else:
+            print(f"  WARNING: --adversarial-augment is on but {aug_dir}/ not found.")
+            print(f"  Run: python -m rl_captcha.scripts.generate_augmented_data --data-dir {data_dir}")
+
     return sessions
 
 
 def _load_flexible_json(path: Path, label: int) -> list[Session]:
-    """Load a JSON file that may be in chrome-extension format or flat-array format."""
+    """Load a JSON file in live-confirm or flat-array format."""
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
@@ -220,6 +251,12 @@ def _load_flexible_json(path: Path, label: int) -> list[Session]:
         # Flat array format: [{ session_id, mouse, clicks, ... }, ...]
         for item in data:
             sid = item.get("session_id", item.get("sessionId", f"unknown_{id(item)}"))
+            item_meta = item.get("metadata", {})
+            if not isinstance(item_meta, dict):
+                item_meta = {}
+            item_meta.setdefault("source_file", str(path.name))
+            item_meta.setdefault("bot_type", item.get("bot_type"))
+            item_meta.setdefault("tier", item.get("tier"))
             sessions.append(Session(
                 session_id=sid,
                 label=item.get("label", label),
@@ -227,36 +264,10 @@ def _load_flexible_json(path: Path, label: int) -> list[Session]:
                 clicks=_ensure_list(item.get("clicks")),
                 keystrokes=_ensure_list(item.get("keystrokes")),
                 scroll=_ensure_list(item.get("scroll")),
-                metadata=item.get("metadata", {"source_file": str(path.name)}),
+                metadata=item_meta,
             ))
     elif isinstance(data, dict):
-        # Check if this is chrome extension format (keys are session IDs with
-        # nested segments) or a single flat session object.
-        first_val = next(iter(data.values()), None) if data else None
-
-        if isinstance(first_val, dict) and "segments" in first_val:
-            # Chrome extension export format: { "<sessionId>": { segments: [...] } }
-            for sid, session_data in data.items():
-                mouse, clicks, keystrokes, scroll = [], [], [], []
-                for seg in session_data.get("segments", []):
-                    mouse.extend(seg.get("mouse", []))
-                    clicks.extend(seg.get("clicks", []))
-                    keystrokes.extend(seg.get("keystrokes", []))
-                    scroll.extend(seg.get("scroll", []))
-                sessions.append(Session(
-                    session_id=sid,
-                    label=label,
-                    mouse=mouse,
-                    clicks=clicks,
-                    keystrokes=keystrokes,
-                    scroll=scroll,
-                    metadata={
-                        "source": "chrome_extension",
-                        "source_file": str(path.name),
-                        "page_meta": session_data.get("pageMeta", []),
-                    },
-                ))
-        elif "segments" in data and isinstance(data.get("segments"), list):
+        if "segments" in data and isinstance(data.get("segments"), list):
             # Live-confirm / webapp export format:
             # { "sessionId": "...", "segments": [{ "mouse": [...], ... }] }
             sid = data.get("session_id", data.get("sessionId", path.stem))
@@ -276,11 +287,19 @@ def _load_flexible_json(path: Path, label: int) -> list[Session]:
                 metadata={
                     "source": data.get("source", "live_confirm"),
                     "source_file": str(path.name),
+                    "bot_type": data.get("bot_type"),
+                    "tier": data.get("tier"),
                 },
             ))
         else:
             # Single flat session object
             sid = data.get("session_id", data.get("sessionId", path.stem))
+            raw_meta = data.get("metadata", {})
+            if not isinstance(raw_meta, dict):
+                raw_meta = {}
+            raw_meta.setdefault("source_file", str(path.name))
+            raw_meta.setdefault("bot_type", data.get("bot_type"))
+            raw_meta.setdefault("tier", data.get("tier"))
             sessions.append(Session(
                 session_id=sid,
                 label=data.get("label", label),
@@ -288,7 +307,7 @@ def _load_flexible_json(path: Path, label: int) -> list[Session]:
                 clicks=_ensure_list(data.get("clicks")),
                 keystrokes=_ensure_list(data.get("keystrokes")),
                 scroll=_ensure_list(data.get("scroll")),
-                metadata=data.get("metadata", {"source_file": str(path.name)}),
+                metadata=raw_meta,
             ))
 
     return sessions
@@ -397,13 +416,22 @@ def split_sessions(
 
     Both human and bot sessions are split independently so each set
     maintains the same label proportions as the full dataset.
+
+    Augmented copies (detected by ``_aug_`` in the session ID or
+    ``metadata["augmented"]``) are always placed in the same split as
+    their source session to prevent data leakage.  Because only the
+    original sessions determine the split boundaries, the partition of
+    originals is identical whether or not augmented data is loaded.
     """
     import random as _rng
 
     assert abs(train + val + test - 1.0) < 1e-6, "Ratios must sum to 1.0"
 
-    human = [s for s in sessions if s.label == 1]
-    bot = [s for s in sessions if s.label == 0]
+    originals = [s for s in sessions if not _is_augmented(s)]
+    augmented = [s for s in sessions if _is_augmented(s)]
+
+    human = [s for s in originals if s.label == 1]
+    bot = [s for s in originals if s.label == 0]
 
     def _split_group(group: list[Session]) -> tuple[list[Session], list[Session], list[Session]]:
         rng = _rng.Random(seed)
@@ -417,8 +445,66 @@ def split_sessions(
     h_train, h_val, h_test = _split_group(human)
     b_train, b_val, b_test = _split_group(bot)
 
+    # Build lookup so augmented copies land in the same split as their source
+    split_lookup: dict[str, str] = {}
+    for s in h_train + b_train:
+        split_lookup[s.session_id] = "train"
+    for s in h_val + b_val:
+        split_lookup[s.session_id] = "val"
+    for s in h_test + b_test:
+        split_lookup[s.session_id] = "test"
+
+    aug_buckets: dict[str, list[Session]] = {"train": [], "val": [], "test": []}
+    for s in augmented:
+        target = split_lookup.get(_base_session_id(s), "train")
+        aug_buckets[target].append(s)
+
     return (
-        h_train + b_train,
-        h_val + b_val,
-        h_test + b_test,
+        h_train + b_train + aug_buckets["train"],
+        h_val + b_val + aug_buckets["val"],
+        h_test + b_test + aug_buckets["test"],
     )
+
+
+def split_sessions_by_family(
+    sessions: list[Session],
+    held_out_families: list[str] | None = None,
+    held_out_tiers: list[int] | None = None,
+    train: float = 0.70,
+    val: float = 0.15,
+    test: float = 0.15,
+    seed: int = 42,
+) -> tuple[list[Session], list[Session], list[Session]]:
+    """Split sessions with held-out bot families for generalization testing.
+
+    Bot sessions matching *held_out_families* or *held_out_tiers* go entirely
+    into the **test** set so the model is evaluated on unseen bot strategies.
+    Remaining sessions are split normally with stratification.
+    Human sessions are always split across all sets.
+    """
+    assert abs(train + val + test - 1.0) < 1e-6, "Ratios must sum to 1.0"
+
+    held_families = set(held_out_families or [])
+    held_tiers = set(held_out_tiers or [])
+
+    def _is_held_out(s: Session) -> bool:
+        if s.label != 0:
+            return False
+        bt = s.metadata.get("bot_type")
+        if bt and bt in held_families:
+            return True
+        tier = s.metadata.get("tier") or bot_type_to_tier(bt)
+        if tier in held_tiers:
+            return True
+        return False
+
+    held_out_bots = [s for s in sessions if _is_held_out(s)]
+    seen_sessions = [s for s in sessions if not _is_held_out(s)]
+
+    # Split the seen sessions normally
+    seen_train, seen_val, seen_test = split_sessions(
+        seen_sessions, train=train, val=val, test=test, seed=seed,
+    )
+
+    # Add held-out bots to test set only
+    return seen_train, seen_val, seen_test + held_out_bots

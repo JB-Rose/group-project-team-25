@@ -18,7 +18,7 @@ import gymnasium as gym
 import numpy as np
 
 from rl_captcha.config import EventEnvConfig
-from rl_captcha.data.loader import Session
+from rl_captcha.data.loader import Session, bot_type_to_tier
 
 ACTION_NAMES = [
     "continue", "deploy_honeypot",
@@ -34,6 +34,49 @@ EVENT_KEY_UP = 3
 EVENT_SCROLL = 4
 
 INTERACTIVE_TAGS = {"INPUT", "BUTTON", "A", "SELECT", "TEXTAREA"}
+
+
+def _honeypot_bot_trigger_prob(cfg: EventEnvConfig, meta: dict) -> float:
+    """Per-tier honeypot trigger rate for bots; fallback when tier unknown."""
+    tier = meta.get("tier")
+    if tier is None:
+        tier = bot_type_to_tier(meta.get("bot_type"))
+    try:
+        t = int(tier)
+    except (TypeError, ValueError):
+        t = None
+    rates = cfg.honeypot_trigger_rates_by_tier
+    if t is not None and t in rates:
+        return rates[t]
+    return cfg.honeypot_trigger_rate_bot_fallback
+
+
+def compute_terminal_reward(
+    cfg: EventEnvConfig,
+    action: int,
+    true_label: int,
+    metadata: dict,
+    rng: random.Random,
+) -> tuple[float, str]:
+    """Reward for terminal actions 2--6 (puzzles, allow, block). Shared with online training."""
+    if action in (2, 3, 4):
+        human_pass, bot_pass = cfg.puzzle_pass_rates[action]
+        if true_label == 1:
+            if rng.random() < human_pass:
+                return cfg.human_puzzle_friction[action], "human_passed_puzzle"
+            return cfg.penalty_human_puzzle_fail, "fp_puzzle"
+        if rng.random() < bot_pass:
+            return cfg.penalty_bot_passes_puzzle, "bot_passed_puzzle"
+        return cfg.puzzle_catch_rewards[action], "bot_blocked_puzzle"
+    if action == 5:
+        if true_label == 1:
+            return cfg.reward_correct_allow, "correct_allow"
+        return cfg.penalty_bot_missed_allow, "false_negative"
+    if action == 6:
+        if true_label == 0:
+            return cfg.reward_direct_block_bot, "correct_block"
+        return cfg.penalty_block_human, "false_positive_block"
+    raise ValueError(f"Not a terminal action: {action}")
 
 
 def _safe_var(arr: list[float]) -> float:
@@ -102,7 +145,6 @@ class EventEncoder:
             events.append({"_type": EVENT_SCROLL, **evt})
 
         events.sort(key=lambda e: e.get("t", e.get("timestamp", 0)))
-
         return events
 
     def encode_window(self, events: list[dict]) -> np.ndarray:
@@ -188,23 +230,23 @@ class EventEncoder:
             vec[12] = min(_safe_var(click_dts), cfg.max_dt_ms ** 2) / (cfg.max_dt_ms ** 2)
 
         # ── Keystroke features [13-16] ───────────────────────────────
-        key_downs = {}
+        key_downs: dict[str, list[float]] = {}
         key_holds = []
         key_down_times = []
         for e in events:
             if e["_type"] == EVENT_KEY_DOWN:
-                key = e.get("key", e.get("field", ""))
+                key = e.get("field") or e.get("key") or ""
                 t = e.get("t", e.get("timestamp", 0)) or 0
-                key_downs[key] = t
+                key_downs.setdefault(key, []).append(t)
                 key_down_times.append(t)
             elif e["_type"] == EVENT_KEY_UP:
-                key = e.get("key", e.get("field", ""))
+                key = e.get("field") or e.get("key") or ""
                 t = e.get("t", e.get("timestamp", 0)) or 0
-                if key in key_downs:
-                    hold = t - key_downs[key]
+                pending = key_downs.get(key)
+                if pending:
+                    hold = t - pending.pop(0)
                     if 0 < hold < 2000:
                         key_holds.append(hold)
-                    del key_downs[key]
 
         if key_holds:
             vec[13] = min(_safe_mean(key_holds), 1000) / 1000
@@ -267,9 +309,16 @@ class EventEncoder:
         return vec
 
 
-def _augment_bot_timeline(events: list[dict], config: EventEnvConfig) -> list[dict]:
-    """Perturb a bot session's timeline to make it harder to distinguish from
-    human data.  Applied stochastically during training so the agent can't
+def _augment_timeline(
+    events: list[dict],
+    config: EventEnvConfig,
+    position_noise_std: float,
+    timing_jitter_std: float,
+    speed_warp_range: tuple,
+) -> list[dict]:
+    """Perturb a session's timeline with configurable noise levels.
+
+    Applied stochastically during training so the agent can't
     rely on trivially separable features (zero variance, locked positions).
 
     Perturbations:
@@ -283,7 +332,7 @@ def _augment_bot_timeline(events: list[dict], config: EventEnvConfig) -> list[di
     rng = random.Random()
 
     # --- 1. Speed warp: stretch/compress all timestamps ----------------
-    lo, hi = config.aug_speed_warp_range
+    lo, hi = speed_warp_range
     warp_factor = rng.uniform(lo, hi)
 
     # Anchor at the first timestamp so the session start doesn't drift
@@ -299,22 +348,22 @@ def _augment_bot_timeline(events: list[dict], config: EventEnvConfig) -> list[di
         t_warped = t0 + (t_orig - t0) * warp_factor
 
         # --- 2. Timing jitter ------------------------------------------
-        t_warped += rng.gauss(0, config.aug_timing_jitter_std)
+        t_warped += rng.gauss(0, timing_jitter_std)
         e[t_key] = max(0, t_warped)
 
         # --- 3. Position noise ------------------------------------------
         if "x" in e and e["x"] is not None:
             e["x"] = max(0, min(config.max_coord_x,
-                                e["x"] + rng.gauss(0, config.aug_position_noise_std)))
+                                e["x"] + rng.gauss(0, position_noise_std)))
         if "y" in e and e["y"] is not None:
             e["y"] = max(0, min(config.max_coord_y,
-                                e["y"] + rng.gauss(0, config.aug_position_noise_std)))
+                                e["y"] + rng.gauss(0, position_noise_std)))
         if "pageX" in e and e["pageX"] is not None:
             e["pageX"] = max(0, min(config.max_coord_x,
-                                    e["pageX"] + rng.gauss(0, config.aug_position_noise_std)))
+                                    e["pageX"] + rng.gauss(0, position_noise_std)))
         if "pageY" in e and e["pageY"] is not None:
             e["pageY"] = max(0, min(config.max_coord_y,
-                                    e["pageY"] + rng.gauss(0, config.aug_position_noise_std)))
+                                    e["pageY"] + rng.gauss(0, position_noise_std)))
 
         augmented.append(e)
 
@@ -384,6 +433,8 @@ class EventEnv(gym.Env):
         super().reset(seed=seed)
 
         # Balanced 50/50 sampling
+        if not self._sessions:
+            raise RuntimeError("EventEnv has no sessions — load data before calling reset()")
         if self._human_sessions and self._bot_sessions:
             if random.random() < 0.5:
                 session = random.choice(self._human_sessions)
@@ -401,26 +452,49 @@ class EventEnv(gym.Env):
 
         timeline = self._encoder.build_timeline(session)
 
-        # Augment bot sessions stochastically during training
-        if (self.config.augment
-                and session.label == 0
-                and random.random() < self.config.augment_prob):
-            timeline = _augment_bot_timeline(timeline, self.config)
+        # Augment sessions stochastically during training
+        if self.config.augment and random.random() < self.config.augment_prob:
+            if session.label == 0:
+                # Bot: heavier perturbation
+                timeline = _augment_timeline(
+                    timeline, self.config,
+                    self.config.aug_position_noise_std,
+                    self.config.aug_timing_jitter_std,
+                    self.config.aug_speed_warp_range,
+                )
+            elif self.config.augment_human:
+                # Human: lighter perturbation to simulate natural variation
+                timeline = _augment_timeline(
+                    timeline, self.config,
+                    self.config.aug_human_position_noise_std,
+                    self.config.aug_human_timing_jitter_std,
+                    self.config.aug_human_speed_warp_range,
+                )
 
         # Split timeline into overlapping windows
         ws = self.config.window_size
         stride = ws // 2  # 50% overlap for smoother transitions
-        self._windows = []
+        all_windows = []
         for start in range(0, len(timeline), stride):
             window = timeline[start:start + ws]
             if len(window) >= self.config.min_events:
-                self._windows.append(window)
+                all_windows.append(window)
+
+        # Subsample to max_windows (evenly spaced) so LSTM sees manageable sequences
+        max_w = self.config.max_windows
+        if len(all_windows) > max_w:
+            indices = np.linspace(0, len(all_windows) - 1, max_w, dtype=int)
+            self._windows = [all_windows[i] for i in indices]
+        else:
+            self._windows = all_windows
 
         info = {
             "session_id": session.session_id,
             "true_label": session.label,
             "total_events": len(timeline),
             "total_windows": len(self._windows),
+            "bot_type": session.metadata.get("bot_type"),
+            "tier": session.metadata.get("tier"),
         }
 
         if not self._windows:
@@ -464,8 +538,10 @@ class EventEnv(gym.Env):
             else:
                 self._honeypot_deployed = True
                 self._num_honeypots += 1
+                meta = self._current_session.metadata or {}
                 if true_label == 0:
-                    triggered = random.random() < cfg.honeypot_trigger_rate_bot
+                    p_trig = _honeypot_bot_trigger_prob(cfg, meta)
+                    triggered = random.random() < p_trig
                 else:
                     triggered = random.random() < cfg.honeypot_trigger_rate_human
                 self._honeypot_triggered = triggered
@@ -477,38 +553,12 @@ class EventEnv(gym.Env):
                 else:
                     outcome = "honeypot_no_trigger"
 
-        elif action in (2, 3, 4):  # puzzle — terminal
+        elif action in (2, 3, 4, 5, 6):  # terminal decisions
             terminated = True
-            human_pass, bot_pass = cfg.puzzle_pass_rates[action]
-            if true_label == 1:
-                reward = cfg.penalty_false_positive * (1.0 - human_pass)
-                outcome = "fp_puzzle"
-            else:
-                if random.random() < bot_pass:
-                    reward = cfg.penalty_false_negative * 0.5
-                    outcome = "bot_passed_puzzle"
-                else:
-                    reward = cfg.reward_correct_block
-                    outcome = "bot_blocked_puzzle"
-            reward -= cfg.action_costs[action]
-
-        elif action == 5:  # allow — terminal
-            terminated = True
-            if true_label == 1:
-                reward = cfg.reward_correct_allow
-                outcome = "correct_allow"
-            else:
-                reward = cfg.penalty_false_negative
-                outcome = "false_negative"
-
-        elif action == 6:  # block — terminal
-            terminated = True
-            if true_label == 0:
-                reward = cfg.reward_correct_block
-                outcome = "correct_block"
-            else:
-                reward = cfg.penalty_false_positive
-                outcome = "false_positive_block"
+            meta = self._current_session.metadata or {}
+            reward, outcome = compute_terminal_reward(
+                cfg, action, true_label, meta, random.Random(),
+            )
 
         # Advance to next window for non-terminal actions
         if not terminated:
@@ -538,5 +588,7 @@ class EventEnv(gym.Env):
             "honeypot_deployed": self._honeypot_deployed,
             "honeypot_triggered": self._honeypot_triggered,
             "action_mask": action_mask,
+            "bot_type": self._current_session.metadata.get("bot_type"),
+            "tier": self._current_session.metadata.get("tier"),
         }
         return obs, reward, terminated, truncated, info

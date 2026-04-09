@@ -9,44 +9,47 @@ Automated bot browsing sessions. Treated as **label=0 (bot)** by the training pi
 ### Selenium Bots
 
 ```bash
-cd bots
-python selenium_bot.py --runs 5 --type scripted
+python -m bots.selenium_bot --runs 50 --type mixed --skip-honeypot
 ```
 
-The bot opens Chrome with the telemetry extension. After all runs complete, click **"Export JSON"** in the extension popup and save the file here.
+The bot auto-exports telemetry from the backend API after each run and saves JSON files here automatically. `tracking.js` captures everything in the browser.
 
 ### LLM Bot
 
 ```bash
-cd bots
-python llm_bot.py --runs 3 --provider anthropic
+python bots/llm_bot.py --runs 3 --provider anthropic
 ```
 
-Same process — export from the Chrome extension after runs complete.
+Same auto-export behavior — telemetry is pulled from the backend and saved here after each run.
 
 See `bots/README.md` for full setup and options.
 
 ## JSON Format
 
-Files from the Chrome extension use the same format as human data — session objects keyed by UUID with segments containing mouse, clicks, keystrokes, and scroll arrays.
+Sessions use the live-confirm format with segments at the top level:
 
 ```json
 {
-  "<session_id>": {
-    "sessionId": "...",
-    "segments": [
-      {
-        "mouse": [...],
-        "clicks": [...],
-        "keystrokes": [...],
-        "scroll": [...]
-      }
-    ]
-  }
+  "sessionId": "...",
+  "label": 0,
+  "bot_type": "scripted",
+  "tier": 2,
+  "segments": [
+    {
+      "mouse": [...],
+      "clicks": [...],
+      "keystrokes": [...],
+      "scroll": [...]
+    }
+  ]
 }
 ```
 
-For training, all segments within a session are merged into flat event lists, then grouped into 30-event windows for the windowed observation encoder.
+For training, all segments within a session are merged into flat event lists, then grouped into 30-event windows for the windowed observation encoder and capped by the current `max_windows` setting.
+
+## Current Status
+
+The previous collected dataset was intentionally cleared after telemetry and bot-behavior changes. Recollect fresh bot sessions before retraining.
 
 ## Usage
 

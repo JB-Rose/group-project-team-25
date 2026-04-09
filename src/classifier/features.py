@@ -2,7 +2,7 @@
 
 Aggregates raw telemetry events from a Session into a fixed-size numeric
 feature vector. Features are derived from the actual fields present in the
-Chrome extension telemetry export format.
+live-confirm telemetry export format.
 
 Confirmed field structure (from data/human/ and data/bot/):
     Mouse:      x, y, t, pageX, pageY          (no dt_since_last)
@@ -10,14 +10,20 @@ Confirmed field structure (from data/human/ and data/bot/):
     Keystrokes: dt_since_last, field, key, t, type (down/up)
     Scroll:     dt_since_last, dx, dy, scrollX, scrollY, t
 
-Feature groups (22 total):
-    Mouse (8):      count, avg_speed, std_speed, avg_dt, std_dt,
-                    direction_change_ratio, straightness, jitter_ratio
+Feature groups (39 total):
+    Mouse (9):      count, avg_speed, std_speed, avg_dt, std_dt,
+                    direction_change_ratio, straightness, jitter_ratio,
+                    acceleration_std
     Click (4):      count, avg_interval, std_interval, interactive_ratio
-    Keystroke (5):  count, avg_interval, std_interval,
-                    unique_fields, field_switch_ratio
-    Scroll (5):     count, avg_dy, std_dy, total_abs_scroll,
-                    avg_scroll_speed
+    Keystroke (8):  count, avg_interval, std_interval,
+                    unique_fields, field_switch_ratio, rhythm_regularity,
+                    avg_hold_duration, std_hold_duration
+    Scroll (6):     count, avg_dy, std_dy, total_abs_scroll,
+                    avg_scroll_speed, direction_change_ratio
+    Session (1):    duration
+    Event type ratios (4): mouse_ratio, click_ratio, key_ratio, scroll_ratio
+    Global timing (3): global_mean_dt, global_var_dt, global_min_dt
+    Spatial (4):    unique_x, unique_y, x_range, y_range
 """
 
 from __future__ import annotations
@@ -50,13 +56,15 @@ FEATURE_NAMES = [
     "click_avg_interval",
     "click_std_interval",
     "click_interactive_ratio",
-    # Keystroke (6)
+    # Keystroke (8)
     "keystroke_count",
     "keystroke_avg_interval",
     "keystroke_std_interval",
     "keystroke_unique_fields",
     "keystroke_field_switch_ratio",
     "keystroke_rhythm_regularity",
+    "keystroke_avg_hold_duration",
+    "keystroke_std_hold_duration",
     # Scroll (6)
     "scroll_count",
     "scroll_avg_dy",
@@ -66,21 +74,35 @@ FEATURE_NAMES = [
     "scroll_direction_change_ratio",
     # Session-level (1)
     "session_duration",
+    # Event type ratios (4)
+    "event_ratio_mouse",
+    "event_ratio_click",
+    "event_ratio_key",
+    "event_ratio_scroll",
+    # Global timing (3)
+    "global_mean_dt",
+    "global_var_dt",
+    "global_min_dt",
+    # Spatial (4)
+    "spatial_unique_x",
+    "spatial_unique_y",
+    "spatial_x_range",
+    "spatial_y_range",
 ]
 
-FEATURE_DIM = len(FEATURE_NAMES)  # 26
+FEATURE_DIM = len(FEATURE_NAMES)  # 39
 
 INTERACTIVE_TAGS = {"INPUT", "BUTTON", "A", "SELECT", "TEXTAREA"}
 
 
 class SessionFeatureExtractor:
-    """Converts a Session into a 22-dimensional feature vector.
+    """Converts a Session into a 39-dimensional feature vector.
 
     Usage::
 
         extractor = SessionFeatureExtractor()
-        vec = extractor.extract(session)        # np.ndarray shape (22,)
-        X   = extractor.extract_many(sessions)  # np.ndarray shape (N, 22)
+        vec = extractor.extract(session)        # np.ndarray shape (39,)
+        X   = extractor.extract_many(sessions)  # np.ndarray shape (N, 39)
     """
 
     def __init__(self, config: FeatureConfig | None = None):
@@ -91,21 +113,24 @@ class SessionFeatureExtractor:
     # ------------------------------------------------------------------
 
     def extract(self, session: Session) -> np.ndarray:
-        """Return a (26,) float32 feature vector for one session."""
+        """Return a (39,) float32 feature vector for one session."""
         vec = np.zeros(FEATURE_DIM, dtype=np.float32)
 
         vec[0:9]   = self._mouse_features(session.mouse)
         vec[9:13]  = self._click_features(session.clicks)
-        vec[13:19] = self._keystroke_features(session.keystrokes)
-        vec[19:25] = self._scroll_features(session.scroll)
-        vec[25]    = self._session_duration(session)
+        vec[13:21] = self._keystroke_features(session.keystrokes)
+        vec[21:27] = self._scroll_features(session.scroll)
+        vec[27]    = self._session_duration(session)
+        vec[28:32] = self._event_type_ratios(session)
+        vec[32:35] = self._global_timing(session)
+        vec[35:39] = self._spatial_features(session)
 
         # Replace any NaN/Inf that slipped through with 0
         np.nan_to_num(vec, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
         return vec
 
     def extract_many(self, sessions: list[Session]) -> np.ndarray:
-        """Return (N, 22) feature matrix for a list of sessions."""
+        """Return (N, 39) feature matrix for a list of sessions."""
         return np.stack([self.extract(s) for s in sessions], axis=0)
 
     # ------------------------------------------------------------------
@@ -254,9 +279,10 @@ class SessionFeatureExtractor:
 
     def _keystroke_features(self, events: list[dict]) -> list[float]:
         downs = [e for e in events if e.get("type") == "down"]
+        ups = [e for e in events if e.get("type") == "up"]
         count = len(downs)
         if count == 0:
-            return [0.0] * 6
+            return [0.0] * 8
 
         intervals = []
         fields_seen = []
@@ -298,6 +324,29 @@ class SessionFeatureExtractor:
         else:
             rhythm_regularity = 0.0
 
+        # Hold duration: pair key-down with key-up using field (or key)
+        # as a matching identifier. Bots have near-zero or perfectly
+        # uniform hold times; humans show natural variation.
+        pending_downs: dict[str, list[float]] = {}
+        hold_durations: list[float] = []
+
+        for evt in sorted(downs, key=lambda e: e.get("t", 0)):
+            key_id = evt.get("field") or evt.get("key") or ""
+            t = float(evt.get("t", 0) or 0)
+            pending_downs.setdefault(key_id, []).append(t)
+
+        for evt in sorted(ups, key=lambda e: e.get("t", 0)):
+            key_id = evt.get("field") or evt.get("key") or ""
+            t = float(evt.get("t", 0) or 0)
+            pending = pending_downs.get(key_id)
+            if pending:
+                hold = t - pending.pop(0)
+                if 0 < hold < 2000:  # filter unreasonable values
+                    hold_durations.append(hold)
+
+        avg_hold = float(np.mean(hold_durations)) if hold_durations else 0.0
+        std_hold = float(np.std(hold_durations))  if hold_durations else 0.0
+
         return [
             float(count),
             avg_interval,
@@ -305,6 +354,8 @@ class SessionFeatureExtractor:
             unique_fields,
             field_switch_ratio,
             rhythm_regularity,
+            avg_hold,
+            std_hold,
         ]
 
     # ------------------------------------------------------------------
@@ -391,3 +442,94 @@ class SessionFeatureExtractor:
         if len(all_times) < 2:
             return 0.0
         return max(all_times) - min(all_times)
+
+    # ------------------------------------------------------------------
+    # Event type ratios
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _event_type_ratios(session: Session) -> list[float]:
+        """Fraction of events that are mouse, click, keystroke, scroll."""
+        n_mouse = len(session.mouse)
+        n_click = len(session.clicks)
+        n_key = len([e for e in session.keystrokes if e.get("type") == "down"])
+        n_scroll = len(session.scroll)
+        total = n_mouse + n_click + n_key + n_scroll
+        if total == 0:
+            return [0.0] * 4
+        return [
+            n_mouse / total,
+            n_click / total,
+            n_key / total,
+            n_scroll / total,
+        ]
+
+    # ------------------------------------------------------------------
+    # Global inter-event timing (across all event types)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _global_timing(session: Session) -> list[float]:
+        """Mean, variance, and min of inter-event dt across all event types."""
+        all_times: list[float] = []
+        for evt in session.mouse:
+            t = evt.get("t")
+            if t is not None:
+                all_times.append(float(t))
+        for evt in session.clicks:
+            t = evt.get("t")
+            if t is not None:
+                all_times.append(float(t))
+        for evt in session.keystrokes:
+            t = evt.get("t")
+            if t is not None:
+                all_times.append(float(t))
+        for evt in session.scroll:
+            t = evt.get("t")
+            if t is not None:
+                all_times.append(float(t))
+
+        if len(all_times) < 2:
+            return [0.0] * 3
+
+        all_times.sort()
+        dts = [all_times[i] - all_times[i - 1] for i in range(1, len(all_times))]
+        mean_dt = float(np.mean(dts))
+        var_dt = float(np.var(dts))
+        min_dt = float(min(dts))
+        return [mean_dt, var_dt, min_dt]
+
+    # ------------------------------------------------------------------
+    # Spatial features (from mouse + click positions)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _spatial_features(session: Session) -> list[float]:
+        """Unique position count and coordinate range from mouse + click events."""
+        all_x: list[float] = []
+        all_y: list[float] = []
+
+        for evt in session.mouse:
+            x = evt.get("x", evt.get("pageX"))
+            y = evt.get("y", evt.get("pageY"))
+            if x is not None and y is not None:
+                all_x.append(float(x))
+                all_y.append(float(y))
+
+        for evt in session.clicks:
+            x = evt.get("x")
+            y = evt.get("y")
+            if x is not None and y is not None:
+                all_x.append(float(x))
+                all_y.append(float(y))
+
+        if not all_x:
+            return [0.0] * 4
+
+        # Bin to 10px grid (same as RL encoder) to count meaningful positions
+        unique_x = float(len(set(int(x / 10) for x in all_x)))
+        unique_y = float(len(set(int(y / 10) for y in all_y)))
+        x_range = max(all_x) - min(all_x)
+        y_range = max(all_y) - min(all_y)
+
+        return [unique_x, unique_y, x_range, y_range]

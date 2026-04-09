@@ -1,7 +1,9 @@
-# prototype-sjsuRLCAPTCHA
-This is the old proof of concept / prototype for Ticket Monarch and the RL CAPTCHA system.
+# TicketMonarch Proof Of Concept
 
-### Run using
+Legacy JavaFX proof of concept for TicketMonarch and the CAPTCHA ideas explored before the current React + Flask app.
+
+## Run
+
 ```bash
 mvn clean javafx:run
 ```

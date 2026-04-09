@@ -43,8 +43,8 @@ class ClassifierConfig:
     behavioral patterns.
     """
 
-    n_estimators: int = 50
-    max_depth: int = 2                     # very shallow trees reduce overfitting
+    n_estimators: int = 200
+    max_depth: int = 3
     learning_rate: float = 0.05            # slow learning + early stopping
     subsample: float = 0.7                 # row subsampling per tree
     colsample_bytree: float = 0.7          # feature subsampling per tree
@@ -63,6 +63,18 @@ class ClassifierConfig:
     # Feature noise augmentation: add Gaussian noise to training features
     # to simulate data variation and prevent reliance on exact values.
     feature_noise_std: float = 0.5          # std of noise relative to feature std
+    n_augment_copies: int = 3              # number of noisy copies to generate
+
+    # Adversarial augmentation: create "humanized" copies of bot samples
+    # by interpolating features toward the human distribution. Forces the
+    # classifier to learn deeper patterns instead of surface-level differences.
+    adversarial_augment: bool = True        # enable adversarial bot humanization
+    n_adversarial_copies: int = 2           # humanized copies per bot sample
+    adversarial_blend_range: tuple = (0.2, 0.6)  # (min, max) interpolation toward human mean
+    adversarial_noise_std: float = 0.3      # extra Gaussian noise on blended features
+
+    # Feature standardization
+    standardize: bool = True               # apply StandardScaler before training
 
 
 @dataclass
@@ -94,27 +106,40 @@ class EventEnvConfig:
 
     # Session limits
     min_events: int = 10              # skip sessions with fewer events
+    max_windows: int = 256            # cap windows per episode (subsample if longer)
 
-    # Action costs
+    # Action costs (continue / honeypot; puzzle friction for humans is human_puzzle_friction)
     action_costs: list[float] = field(
         default_factory=lambda: [
             0.0,    # continue
-            0.01,   # deploy_honeypot
-            0.1,    # easy_puzzle
-            0.3,    # medium_puzzle
-            0.5,    # hard_puzzle
-            0.0,    # allow
-            0.0,    # block
+            0.0,    # deploy_honeypot
+            0.0,    # easy_puzzle (unused — see human_puzzle_friction)
+            0.0, 0.0,
+            0.0, 0.0,
         ]
     )
 
-    # Reward structure
-    reward_correct_block: float = 1.0
-    reward_correct_allow: float = 0.5
-    penalty_false_positive: float = -1.0
-    penalty_false_negative: float = -0.8
-    continue_penalty: float = 0.001      # tiny per-window time pressure
-    honeypot_info_bonus: float = 0.3
+    # --- Reward structure (interactive CAPTCHA: puzzles can beat direct block on bots) ---
+    # Bot caught by puzzle (bot fails challenge) — evidence-based, tiered by difficulty
+    puzzle_catch_rewards: dict[int, float] = field(
+        default_factory=lambda: {2: 0.8, 3: 1.0, 4: 1.2},
+    )
+    # Human passes puzzle: UX friction only (negative)
+    human_puzzle_friction: dict[int, float] = field(
+        default_factory=lambda: {2: -0.05, 3: -0.20, 4: -0.40},
+    )
+    penalty_human_puzzle_fail: float = -1.0   # human fails puzzle (false alarm)
+    penalty_bot_passes_puzzle: float = -0.5   # bot slips through challenge
+
+    reward_direct_block_bot: float = 0.7      # block without puzzle evidence (less preferred)
+    penalty_block_human: float = -1.5         # direct block human — worst UX
+    penalty_bot_missed_allow: float = -1.0    # allow a bot (false negative)
+
+    reward_correct_allow: float = 0.5         # allow human
+    penalty_false_negative: float = -1.0      # kept for scripts; allow-bot uses penalty_bot_missed_allow
+    penalty_false_positive: float = -1.0      # legacy / train --fp-penalty (human puzzle fail)
+    continue_penalty: float = 0.001
+    honeypot_info_bonus: float = 0.5
     truncation_penalty: float = -0.5
     max_honeypots: int = 2
 
@@ -127,16 +152,30 @@ class EventEnvConfig:
         }
     )
 
-    # Honeypot trigger rates
-    honeypot_trigger_rate_bot: float = 0.6
+    # Tier-dependent honeypot trigger (bots); human rate fixed below
+    honeypot_trigger_rates_by_tier: dict[int, float] = field(
+        default_factory=lambda: {
+            1: 0.85,
+            2: 0.55,
+            3: 0.30,
+            4: 0.15,
+            5: 0.05,
+        },
+    )
+    honeypot_trigger_rate_bot_fallback: float = 0.55
     honeypot_trigger_rate_human: float = 0.01
 
-    # Data augmentation (applied to BOT sessions only, per-episode during training)
+    # Data augmentation (per-episode during training)
     augment: bool = True              # enable stochastic augmentation
-    augment_prob: float = 0.5         # probability of augmenting each bot episode
+    augment_prob: float = 0.5         # probability of augmenting each episode
     aug_position_noise_std: float = 15.0   # Gaussian noise on x/y coords (px)
     aug_timing_jitter_std: float = 30.0    # Gaussian noise on timestamps (ms)
     aug_speed_warp_range: tuple = (0.7, 1.4)  # random time stretch/compress
+    # Human augmentation uses lighter perturbation to simulate natural variation
+    augment_human: bool = True
+    aug_human_position_noise_std: float = 5.0    # lighter jitter than bots
+    aug_human_timing_jitter_std: float = 15.0    # lighter timing noise
+    aug_human_speed_warp_range: tuple = (0.85, 1.15)  # narrower warp
 
     # Normalization constants for event encoding
     max_coord_x: float = 1920.0
@@ -155,15 +194,15 @@ class PPOConfig:
     gae_lambda: float = 0.95
     clip_eps: float = 0.2
     value_loss_coeff: float = 0.5
-    entropy_coeff: float = 0.01
+    entropy_coeff: float = 0.02
     max_grad_norm: float = 0.5
 
     # LSTM
-    lstm_hidden_size: int = 256
-    lstm_num_layers: int = 2
+    lstm_hidden_size: int = 128
+    lstm_num_layers: int = 1
 
     # Rollout
-    rollout_steps: int = 2048
+    rollout_steps: int = 4096
     num_epochs: int = 4
 
     # Training

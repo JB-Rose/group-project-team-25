@@ -1,7 +1,15 @@
-"""Agent inference service — wraps PPO+LSTM for live evaluation.
+"""Agent inference service — wraps PPO/DG/Soft-PPO+LSTM for live evaluation.
 
 Loads the trained agent once on first use, then evaluates sessions
 by replaying events through the LSTM and returning the decision.
+
+Algorithm selection via environment variable:
+    RL_ALGORITHM=ppo       → loads checkpoints/ppo_run1       (default)
+    RL_ALGORITHM=dg        → loads checkpoints/dg_run1
+    RL_ALGORITHM=soft_ppo  → loads checkpoints/soft_ppo_run1
+
+All three algorithms share the same PPOLSTM base for inference; the
+only difference is the update() method used during online learning.
 
 Action masking: non-final windows only allow continue/honeypot (0,1).
 The final window only allows terminal actions (2-6: puzzles, allow, block).
@@ -11,6 +19,8 @@ This matches the training environment exactly.
 from __future__ import annotations
 
 import logging
+import os
+import random
 import sys
 import threading
 from datetime import datetime, timezone
@@ -25,9 +35,18 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from rl_captcha.agent.ppo_lstm import PPOLSTM
-from rl_captcha.config import EventEnvConfig
+from rl_captcha.agent.dg_lstm import DGLSTM, DGConfig
+from rl_captcha.agent.soft_ppo_lstm import SoftPPOLSTM, SoftPPOConfig
+from rl_captcha.config import EventEnvConfig, PPOConfig
 from rl_captcha.data.loader import Session
-from rl_captcha.environment.event_env import EventEncoder, ACTION_NAMES
+from rl_captcha.environment.event_env import EventEncoder, ACTION_NAMES, compute_terminal_reward
+
+# Algorithm → default checkpoint subdirectory name
+_ALGO_DEFAULTS = {
+    "ppo": "ppo_noaug",
+    "dg": "dg_noaug",
+    "soft_ppo": "soft_ppo_noaug",
+}
 
 # Action masks matching EventEnv
 NON_FINAL_MASK = np.array([1, 1, 0, 0, 0, 0, 0], dtype=np.float32)
@@ -35,12 +54,31 @@ FINAL_MASK = np.array([0, 0, 1, 1, 1, 1, 1], dtype=np.float32)
 
 
 class AgentService:
-    """Singleton service that loads PPO+LSTM agent for inference and online learning."""
+    """Singleton service that loads PPO/DG/Soft-PPO+LSTM agent for inference and online learning.
 
-    def __init__(self, checkpoint_path: str | None = None):
+    The algorithm is selected via:
+        1. The ``algorithm`` constructor argument, OR
+        2. The ``RL_ALGORITHM`` environment variable (ppo | dg | soft_ppo), OR
+        3. Defaults to ``ppo``.
+    """
+
+    def __init__(
+        self,
+        checkpoint_path: str | None = None,
+        algorithm: str | None = None,
+    ):
+        # Resolve algorithm
+        self.algorithm = (algorithm or os.getenv("RL_ALGORITHM", "ppo")).lower()
+        if self.algorithm not in _ALGO_DEFAULTS:
+            raise ValueError(
+                f"Unknown RL algorithm '{self.algorithm}'. "
+                f"Choose from: {', '.join(_ALGO_DEFAULTS)}"
+            )
+
         if checkpoint_path is None:
             checkpoint_path = str(
-                PROJECT_ROOT / "rl_captcha" / "agent" / "checkpoints" / "ppo_run1"
+                PROJECT_ROOT / "rl_captcha" / "agent" / "checkpoints"
+                / _ALGO_DEFAULTS[self.algorithm]
             )
 
         self.checkpoint_path = checkpoint_path
@@ -58,21 +96,28 @@ class AgentService:
             self._online_logger.addHandler(fh)
 
         self._lock = threading.Lock()
-        self.agent = PPOLSTM(
-            obs_dim=self.env_config.event_dim,
-            action_dim=7,
-            device="cpu",
-        )
+        self.agent = self._create_agent()
 
         cp = Path(checkpoint_path) / "ppo_lstm_checkpoint.pt"
         if cp.exists():
             self.agent.load(checkpoint_path)
             self.agent.network.eval()
             self._loaded = True
-            print(f"[AgentService] Loaded checkpoint from {checkpoint_path}")
+            print(f"[AgentService] Loaded {self.algorithm.upper()} checkpoint from {checkpoint_path}")
         else:
             self._loaded = False
             print(f"[AgentService] WARNING: No checkpoint at {checkpoint_path}, agent will allow all")
+
+    def _create_agent(self) -> PPOLSTM:
+        """Instantiate the correct agent class based on self.algorithm."""
+        kwargs = dict(obs_dim=self.env_config.event_dim, action_dim=7, device="cpu")
+
+        if self.algorithm == "dg":
+            return DGLSTM(config=DGConfig(), **kwargs)
+        elif self.algorithm == "soft_ppo":
+            return SoftPPOLSTM(config=SoftPPOConfig(), **kwargs)
+        else:
+            return PPOLSTM(config=PPOConfig(), **kwargs)
 
     def _build_windows(self, session: Session) -> tuple[list[dict], list[list[dict]]]:
         """Build timeline and split into overlapping windows."""
@@ -86,6 +131,11 @@ class AgentService:
             window = timeline[start:start + ws]
             if len(window) >= self.env_config.min_events:
                 windows.append(window)
+
+        max_w = self.env_config.max_windows
+        if len(windows) > max_w:
+            indices = np.linspace(0, len(windows) - 1, max_w, dtype=int)
+            windows = [windows[i] for i in indices]
 
         return timeline, windows
 
@@ -172,6 +222,7 @@ class AgentService:
             "action_history": action_history,
             "p_allow": round(p_allow, 4),
             "p_suspicious": round(p_suspicious, 4),
+            "algorithm": self.algorithm,
         }
 
     def rolling_evaluate(self, session: Session) -> dict:
@@ -285,15 +336,10 @@ class AgentService:
             action, log_prob, value = self.agent.select_action(obs, action_mask=mask)
 
             if is_last:
-                # terminal reward based on true label
-                if action == 5:  # allow
-                    reward = cfg.reward_correct_allow if true_label == 1 else cfg.penalty_false_negative
-                elif action == 6:  # block
-                    reward = cfg.reward_correct_block if true_label == 0 else cfg.penalty_false_positive
-                elif action in (2, 3, 4):  # puzzle
-                    reward = cfg.penalty_false_positive * 0.7 if true_label == 1 else cfg.reward_correct_block * 0.9
-                else:
-                    reward = -0.3  # should not happen with masking
+                meta = session.metadata if session.metadata else {}
+                reward, _out = compute_terminal_reward(
+                    cfg, action, true_label, meta, random.Random(),
+                )
                 done = True
             else:
                 reward = -cfg.continue_penalty
@@ -332,7 +378,7 @@ class AgentService:
         self.agent.save(self.checkpoint_path)
 
         log = self._online_logger
-        log.info(f"--- Online Update #{self._online_update_count} | {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} ---")
+        log.info(f"--- Online Update #{self._online_update_count} [{self.algorithm.upper()}] | {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')} ---")
         log.info(f"  True label: {label_str} | Events: {len(timeline)} | Windows: {len(windows)}")
         log.info(f"  BEFORE: decision={before['decision']} p_allow={before.get('p_allow', 0):.4f} p_suspicious={before.get('p_suspicious', 0):.4f} {'CORRECT' if before_correct else 'WRONG'}")
         log.info(f"  AFTER:  decision={after['decision']} p_allow={after.get('p_allow', 0):.4f} p_suspicious={after.get('p_suspicious', 0):.4f} {'CORRECT' if after_correct else 'WRONG'}")
@@ -352,7 +398,8 @@ class AgentService:
 
     def get_hidden_state_info(self) -> dict:
         """Return LSTM hidden state for visualization (last layer only)."""
-        h, c = self.agent.get_hidden()
+        with self._lock:
+            h, c = self.agent.get_hidden()
         # h shape: (num_layers, 1, hidden_size) — use last layer for viz
         last_h = h[-1].squeeze(0).cpu().numpy()  # (hidden_size,)
         return {

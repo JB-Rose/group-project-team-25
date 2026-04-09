@@ -1,6 +1,6 @@
 # RL-Based Strategies for Improving and Attacking Synthetic CAPTCHAs
 
-> A mock concert ticket-booking web app that uses a PPO+LSTM reinforcement learning agent to detect bots in real time based on raw telemetry (mouse movements, clicks, keystrokes, scrolls).
+> A mock concert ticket-booking web app that uses reinforcement learning (PPO, DG, or Soft PPO — all LSTM-based) to detect bots in real time based on raw telemetry (mouse movements, clicks, keystrokes, scrolls).
 
 ## Team
 
@@ -21,8 +21,8 @@
 |----------|------------|
 | Frontend | React 18.2, Vite 5, React Router DOM 6, vanilla CSS  |
 | Backend | Python 3.12, Flask 3.0, Flask-CORS, mysql-connector-python |
+| RL Agent | PyTorch, PPO/DG/Soft-PPO + LSTM (algorithm selectable via `RL_ALGORITHM` env var) |
 | Database | MySQL 8.0+ |
-| Deployment | |
 
 ---
 
@@ -30,9 +30,9 @@
 
 ### Prerequisites
 
-- [Python] 3.12+
-- [Node.js] 18+
-- [MySQL] 8.0+
+- Python 3.12+
+- Node.js 18+
+- MySQL 8.0+
 
 ### Installation
 
@@ -100,6 +100,8 @@ Open **two terminals** (activate the venv in each if running Python):
 
 ```bash
 # Terminal 1 — Backend (http://localhost:5000)
+# Set RL_ALGORITHM to ppo, dg, or soft_ppo (defaults to ppo)
+set RL_ALGORITHM=dg          # PowerShell: $env:RL_ALGORITHM="dg"
 python TicketMonarch/backend/app.py
 
 # Terminal 2 — Frontend (http://localhost:3000)
@@ -115,11 +117,11 @@ Open **http://localhost:3000** in your browser. Vite proxies `/api/*` requests t
 1. **Home** (`/`) — Browse concerts and select one
 2. **Seat Selection** (`/seats/:id`) — Pick seats from an interactive layout
 3. **Checkout** (`/checkout`) — Fill the payment form
-   - Rolling inference polls every 3 seconds; deploys a honeypot if suspicious
-   - On "Purchase": telemetry is force-flushed and the agent evaluates the full session
-   - Honeypot triggered → instant hard puzzle
-   - High bot probability → scaled puzzle (easy/medium/hard based on confidence)
-   - Low suspicion → checkout proceeds
+   - Rolling inference polls every 3 seconds and can request honeypot deployment
+   - Telemetry is force-flushed before final verification
+   - Final checkout uses the RL policy endpoint (`/api/agent/evaluate`)
+   - Policy outputs map directly to `allow`, `block`, or `easy/medium/hard` puzzle
+   - Honeypot interactions immediately escalate to a hard puzzle
 4. **Confirmation** (`/confirmation`) — Order confirmed, session sent for online RL update
 
 ## Dev Dashboard
@@ -128,6 +130,13 @@ Open **http://localhost:3000/dev** in a separate tab.
 
 - **Live Monitor:** Auto-detects the active session, polls every 1 second showing real-time event counts and rolling bot probability.
 - **Analyze Session:** Full agent analysis on any session — decision banner, action probability bars, per-event timeline, LSTM hidden-state heatmap.
+
+## Data Collection Notes
+
+- Mouse telemetry is now only sampled after real mouse movement; stationary cursors no longer emit endless duplicate points.
+- Frontend telemetry batches are re-queued on failed network writes instead of being dropped.
+- Bot generators were toned down so bot sessions better resemble real checkout flows.
+- Because telemetry semantics changed, the previous JSON training set was cleared. Recollect fresh human and bot data before retraining.
 ---
 
 ## API Reference
@@ -166,7 +175,7 @@ src/
 │   ├── backend/            # Flask API + agent inference
 │   ├── frontend/           # React + Vite SPA
 │   └── .env.example        # MySQL connection config template
-├── rl_captcha/             # PPO+LSTM agent (training & evaluation)
+├── rl_captcha/             # RL agents: PPO, DG, Soft PPO (training & evaluation)
 ├── bots/                   # Selenium & LLM bots for data collection
 ├── chrome-extension/       # Telemetry capture extension
 └── data/                   # Training data (human/ and bot/)

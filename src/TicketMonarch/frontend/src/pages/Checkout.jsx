@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import './Checkout.css'
-import { submitCheckout, rollingEvaluate, getFlag } from '../services/api'
+import { submitCheckout, rollingEvaluate, evaluateSession, getFlag } from '../services/api'
 import { forceFlush, getSessionId } from '../services/tracking'
 import ChallengeModal from '../components/ChallengeModal'
 
@@ -41,6 +41,7 @@ function Checkout() {
   const [challengeState, setChallengeState] = useState(null)
   const [processing, setProcessing] = useState(false)
   const [errors, setErrors] = useState({})
+  const [displayValues, setDisplayValues] = useState({ card_number: ''})
 
   // honeypot state (driven by rolling inference)
   const [honeypotDeployed, setHoneypotDeployed] = useState(false)
@@ -94,6 +95,16 @@ function Checkout() {
       ...prev,
       [name]: value
     }))
+    if (name === 'card_number') {
+        setDisplayValues(prev => ({ ...prev, card_number: value.replace(/\D/g, '')
+                                  .slice(0, 19).replace(/(.{4})/g, '$1 ').trim() })) }
+    if (name === 'card_expiry') {
+       const digits = value.replace(/\D/g, '').slice(0, 4)
+        setFormData(prev => ({
+          ...prev,
+          card_expiry: digits
+      }))
+    }
     // clear error for this field on change
     if (errors[name]) {
       setErrors(prev => ({ ...prev, [name]: null }))
@@ -124,8 +135,9 @@ function Checkout() {
       errs.card_number = 'Card number must be 13–19 digits'
     }
 
-    // --- expiry: MM/YY format ---
-    if (formData.card_expiry.trim() && !/^(0[1-9]|1[0-2])\/\d{2}$/.test(formData.card_expiry.trim())) {
+    // --- expiry: 4 digits forming valid MM and YY (slash optional/ignored) ---
+    const expiryDigits = formData.card_expiry.replace(/\D/g, '')
+    if (formData.card_expiry.trim() && !/^\d{4}$/.test(expiryDigits)) {
       errs.card_expiry = 'Use MM/YY format'
     }
 
@@ -190,15 +202,15 @@ function Checkout() {
 
     const sessionId = getSessionId()
 
-    // flush all remaining telemetry then run final evaluation on all the captured data
+    // Flush all remaining telemetry, then run the terminal policy once.
     await forceFlush()
     const CAPTCHAFlag = await getFlag()
     const flag = CAPTCHAFlag?.data?.flag ?? "inactive"
-    const rolling = await rollingEvaluate(sessionId)
-    const botProb = rolling?.bot_probability || 0
-    const eventsProcessed = rolling?.events_processed || 0
+    const finalEval = await evaluateSession(sessionId)
+    const decision = finalEval?.decision
+    const eventsProcessed = finalEval?.events_processed || 0
 
-    console.log(`[RL] session=${sessionId} bot_prob=${(botProb * 100).toFixed(1)}% events=${eventsProcessed} honeypot=${honeypotTriggered}`)
+    console.log(`[RL] session=${sessionId} decision=${decision || 'unknown'} events=${eventsProcessed} honeypot=${honeypotTriggered}`)
 
     // Force CAPTCHA flag set in dev dashboard
     if (flag === "on") {
@@ -222,22 +234,41 @@ function Checkout() {
     }
     
     // Honeypot is always trustworthy so we give hard puzzle.
-    if (honeypotTriggered || rolling?.honeypot_triggered) {
+    if (honeypotTriggered || finalEval?.honeypot_triggered) {
       setChallengeState({ type: 'puzzle', difficulty: 'hard' })
       setProcessing(false)
       return
     }
 
-    // High suspicion → challenge based on severity
-    if (botProb > 0.45) {
-      const difficulty = botProb > 0.7 ? 'hard' : botProb > 0.55 ? 'medium' : 'easy'
-      setChallengeState({ type: 'puzzle', difficulty })
+    if (!finalEval?.success) {
+      setSubmitMessage('Verification service unavailable. Please try again.')
       setProcessing(false)
       return
     }
 
-    // Low suspicion → allow through
-    await proceedWithCheckout()
+    if (decision === 'allow') {
+      await proceedWithCheckout()
+      setProcessing(false)
+      return
+    }
+
+    if (decision === 'block') {
+      // Show a hard puzzle instead of a hard block — humans can still prove
+      // themselves. The RL agent's "block" decision is still recorded
+      // internally; online learning on the Confirmation page will penalise
+      // the agent for false-positives once the true label is revealed.
+      setChallengeState({ type: 'puzzle', difficulty: 'hard' })
+      setProcessing(false)
+      return
+    }
+
+    if (['easy_puzzle', 'medium_puzzle', 'hard_puzzle'].includes(decision)) {
+      setChallengeState({ type: 'puzzle', difficulty: decision.replace('_puzzle', '') })
+      setProcessing(false)
+      return
+    }
+
+    setSubmitMessage('Unexpected verification response. Please try again.')
     setProcessing(false)
   }
 
@@ -312,7 +343,7 @@ function Checkout() {
                   id="card_number"
                   name="card_number"
                   className={errors.card_number ? 'input-error' : ''}
-                  value={formData.card_number}
+                  value={displayValues.card_number}
                   onChange={handleChange}
                   placeholder="1234 5678 9012 3456"
                 />
@@ -327,7 +358,11 @@ function Checkout() {
                     id="card_expiry"
                     name="card_expiry"
                     className={errors.card_expiry ? 'input-error' : ''}
-                    value={formData.card_expiry}
+                    value={
+                        formData.card_expiry.length > 2
+                          ? formData.card_expiry.slice(0, 2) + '/' + formData.card_expiry.slice(2)
+                          : formData.card_expiry
+                    }
                     onChange={handleChange}
                     placeholder="MM/YY"
                   />

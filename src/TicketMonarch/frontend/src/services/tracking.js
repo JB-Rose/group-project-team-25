@@ -16,13 +16,16 @@ let keystrokeBuffer = []
 let scrollBuffer = []
 
 let lastMouseEvent = null
+let mouseMovedSinceSample = false
 let lastFlushTime = Date.now()
 let lastClickTimestamp = null
 let lastKeyTimestampByField = {}
 let lastScrollTimestamp = null
 
 let mouseIntervalId = null
+let flushIntervalId = null
 let isInitialized = false
+let flushInFlight = null
 
 // Non-sensitive special keys worth logging for behavioral analysis.
 // Letters, digits, and modifiers (Shift, Ctrl, Alt, Meta) are excluded.
@@ -65,10 +68,11 @@ function handleRawMouseMove(event) {
     x: event.clientX,
     y: event.clientY
   }
+  mouseMovedSinceSample = true
 }
 
 function sampleMousePosition() {
-  if (!lastMouseEvent || !trackingEnabled) return
+  if (!lastMouseEvent || !trackingEnabled || !mouseMovedSinceSample) return
 
   const timestamp = performance.now()
 
@@ -77,6 +81,7 @@ function sampleMousePosition() {
     y: lastMouseEvent.y,
     t: timestamp
   })
+  mouseMovedSinceSample = false
 }
 
 function handleClick(event) {
@@ -130,107 +135,127 @@ function handleWheel(event) {
   })
 }
 
-async function flushBuffers() {
-  const now = Date.now()
-  const elapsed = now - lastFlushTime
-
-  if (elapsed < FLUSH_INTERVAL_MS) {
-    return
+async function flushBuffers(force = false) {
+  if (flushInFlight) {
+    await flushInFlight
+    // If this is a forced flush, we need to actually run again after the
+    // in-flight one finishes, since it may have been a no-op interval tick.
+    if (!force) return
   }
 
-  lastFlushTime = now
+  flushInFlight = (async () => {
+    try {
+      const now = Date.now()
+      const elapsed = now - lastFlushTime
 
-  if ((!mouseBuffer.length && !clickBuffer.length && !keystrokeBuffer.length && !scrollBuffer.length) || !sessionId) {
-    return
-  }
-
-  const payloadBase = {
-    session_id: getSessionId(),
-    page: currentPage
-  }
-
-  const mousePayload = mouseBuffer.length
-    ? {
-        ...payloadBase,
-        samples: mouseBuffer
+      if (!force && elapsed < FLUSH_INTERVAL_MS) {
+        return
       }
-    : null
 
-  const clickPayload = clickBuffer.length
-    ? {
-        ...payloadBase,
-        clicks: clickBuffer
+      lastFlushTime = now
+
+      if ((!mouseBuffer.length && !clickBuffer.length && !keystrokeBuffer.length && !scrollBuffer.length) || !sessionId) {
+        return
       }
-    : null
 
-  const keystrokePayload = keystrokeBuffer.length
-    ? {
-        ...payloadBase,
-        keystrokes: keystrokeBuffer
+      const payloadBase = {
+        session_id: getSessionId(),
+        page: currentPage
       }
-    : null
 
-  const scrollPayload = scrollBuffer.length
-    ? {
-        ...payloadBase,
-        scrolls: scrollBuffer
+      const mousePayload = mouseBuffer.length
+        ? {
+            ...payloadBase,
+            samples: mouseBuffer
+          }
+        : null
+
+      const clickPayload = clickBuffer.length
+        ? {
+            ...payloadBase,
+            clicks: clickBuffer
+          }
+        : null
+
+      const keystrokePayload = keystrokeBuffer.length
+        ? {
+            ...payloadBase,
+            keystrokes: keystrokeBuffer
+          }
+        : null
+
+      const scrollPayload = scrollBuffer.length
+        ? {
+            ...payloadBase,
+            scrolls: scrollBuffer
+          }
+        : null
+
+      const mouseBatch = mouseBuffer
+      const clickBatch = clickBuffer
+      const keystrokeBatch = keystrokeBuffer
+      const scrollBatch = scrollBuffer
+
+      mouseBuffer = []
+      clickBuffer = []
+      keystrokeBuffer = []
+      scrollBuffer = []
+
+      try {
+        const requests = []
+
+        const postJson = async (url, payload) => {
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          })
+
+          if (!response.ok) {
+            throw new Error(`Request failed: ${response.status}`)
+          }
+        }
+
+        if (mousePayload) {
+          requests.push(
+            postJson(`${API_BASE_URL}/tracking/mouse`, mousePayload)
+          )
+        }
+
+        if (clickPayload) {
+          requests.push(
+            postJson(`${API_BASE_URL}/tracking/clicks`, clickPayload)
+          )
+        }
+
+        if (keystrokePayload) {
+          requests.push(
+            postJson(`${API_BASE_URL}/tracking/keystrokes`, keystrokePayload)
+          )
+        }
+
+        if (scrollPayload) {
+          requests.push(
+            postJson(`${API_BASE_URL}/tracking/scroll`, scrollPayload)
+          )
+        }
+
+        if (requests.length) {
+          await Promise.all(requests)
+        }
+      } catch {
+        // Restore unsent telemetry at the front so old events keep their order.
+        mouseBuffer = mouseBatch.concat(mouseBuffer)
+        clickBuffer = clickBatch.concat(clickBuffer)
+        keystrokeBuffer = keystrokeBatch.concat(keystrokeBuffer)
+        scrollBuffer = scrollBatch.concat(scrollBuffer)
       }
-    : null
-
-  mouseBuffer = []
-  clickBuffer = []
-  keystrokeBuffer = []
-  scrollBuffer = []
-
-  try {
-    const requests = []
-
-    if (mousePayload) {
-      requests.push(
-        fetch(`${API_BASE_URL}/tracking/mouse`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(mousePayload)
-        })
-      )
+    } finally {
+      flushInFlight = null
     }
+  })()
 
-    if (clickPayload) {
-      requests.push(
-        fetch(`${API_BASE_URL}/tracking/clicks`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(clickPayload)
-        })
-      )
-    }
-
-    if (keystrokePayload) {
-      requests.push(
-        fetch(`${API_BASE_URL}/tracking/keystrokes`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(keystrokePayload)
-        })
-      )
-    }
-
-    if (scrollPayload) {
-      requests.push(
-        fetch(`${API_BASE_URL}/tracking/scroll`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(scrollPayload)
-        })
-      )
-    }
-
-    if (requests.length) {
-      await Promise.allSettled(requests)
-    }
-  } catch {
-    // Swallow errors to avoid impacting UX
-  }
+  await flushInFlight
 }
 
 export function initTracking() {
@@ -266,14 +291,15 @@ export function initTracking() {
 
       // Log non-sensitive special key names; letters/digits/modifiers stay null
       const key = LOGGABLE_KEYS.has(event.key) ? event.key : null
-
-      keystrokeBuffer.push({
+      const keystroke = {
         field: fieldId,
         type: 'down',
         t: now,
-        dt_since_last: dt,
-        key: key
-      })
+        dt_since_last: dt
+      }
+
+      if (key) keystroke.key = key
+      keystrokeBuffer.push(keystroke)
     },
     false
   )
@@ -292,13 +318,14 @@ export function initTracking() {
       const now = performance.now()
       const fieldId = target.name || target.id || 'unknown'
       const key = LOGGABLE_KEYS.has(event.key) ? event.key : null
-
-      keystrokeBuffer.push({
+      const keystroke = {
         field: fieldId,
         type: 'up',
-        t: now,
-        key: key
-      })
+        t: now
+      }
+
+      if (key) keystroke.key = key
+      keystrokeBuffer.push(keystroke)
     },
     false
   )
@@ -306,7 +333,7 @@ export function initTracking() {
   mouseIntervalId = window.setInterval(sampleMousePosition, MOUSE_SAMPLE_INTERVAL_MS)
 
   // Periodic flush
-  window.setInterval(flushBuffers, 1000)
+  flushIntervalId = window.setInterval(flushBuffers, 1000)
 }
 
 /**
@@ -314,8 +341,7 @@ export function initTracking() {
  * Call before agent evaluation to ensure DB has latest data.
  */
 export async function forceFlush() {
-  lastFlushTime = 0
-  await flushBuffers()
+  await flushBuffers(true)
 }
 
 /**
@@ -329,15 +355,19 @@ export function resetSession() {
   keystrokeBuffer = []
   scrollBuffer = []
 
-  // Reset timing state
+  // Reset timing state — intervals keep running (they're guarded by
+  // isInitialized and will pick up the new session ID automatically)
   lastMouseEvent = null
+  mouseMovedSinceSample = false
   lastClickTimestamp = null
   lastKeyTimestampByField = {}
   lastScrollTimestamp = null
+  lastFlushTime = Date.now()
 
   // Generate new session ID
   sessionId = uuidv4()
   window.sessionStorage.setItem('tm_session_id', sessionId)
+  window.sessionStorage.removeItem('tm_is_bot')
   window.localStorage.setItem('tm_active_session_id', sessionId)
 
   console.log(`[Tracking] Session reset — new ID: ${sessionId}`)

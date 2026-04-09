@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -110,7 +111,7 @@ def checkout():
     except Exception as e:
         return jsonify({
             'success': False,
-            'error': str(e)
+            'error': 'Internal server error'
         }), 500
 
 
@@ -349,11 +350,12 @@ def agent_rolling():
         traceback.print_exc()
         return jsonify({
             'success': False,
+            'error': str(e),
             'bot_probability': 0.0,
             'deploy_honeypot': False,
             'events_processed': 0,
             'honeypot_triggered': False,
-        }), 200  # Fail open — don't break the form
+        }), 500
 
 
 @app.route('/api/agent/evaluate', methods=['POST'])
@@ -558,6 +560,7 @@ def agent_confirm():
 
         db_session = get_user_session(session_id)
         if not db_session:
+            print(f'[agent_confirm] ERROR: Session {session_id} not found in database!')
             return jsonify({'success': False, 'error': 'session not found'}), 404
 
         from rl_captcha.data.loader import Session
@@ -571,14 +574,14 @@ def agent_confirm():
         )
 
         # ── Save session to JSON for training data ──
-        # Only save for human sessions; bot sessions are already exported
-        # by the bot scripts themselves (telemetry_export_* files).
+        # Set DISABLE_HUMAN_SAVE=1 when running LLM bots to prevent
+        # evasive bots from being saved as human data.
         json_path = None
-        if true_label == 1:
+        if true_label == 1 and not os.environ.get('DISABLE_HUMAN_SAVE'):
             data_dir = Path(__file__).resolve().parent.parent.parent / 'data' / 'human'
             data_dir.mkdir(parents=True, exist_ok=True)
 
-            ts = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H-%M-%S')
+            ts = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H-%M-%S-%f')
             json_path = data_dir / f'session_{session_id[:12]}_{ts}.json'
 
             export_payload = {
@@ -598,9 +601,15 @@ def agent_confirm():
                 print(f'[agent_confirm] Saved human session to {json_path.name}')
             except Exception as save_err:
                 print(f'[agent_confirm] WARNING: Failed to save JSON: {save_err}')
+                json_path = None
 
         agent_svc = _get_agent_service()
-        result = agent_svc.online_learn(session, true_label)
+        # Skip online learning for human labels when DISABLE_HUMAN_SAVE is set
+        # (LLM bot mode) — the frontend auto-confirms with label=1 but it's actually a bot
+        if true_label == 1 and os.environ.get('DISABLE_HUMAN_SAVE'):
+            result = {'updated': False, 'reason': 'human_save_disabled'}
+        else:
+            result = agent_svc.online_learn(session, true_label)
         result['success'] = True
         result['session_id'] = session_id
         result['saved_json'] = str(json_path.name) if json_path else None

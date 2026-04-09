@@ -11,6 +11,12 @@ DOM events (mousemove, click, keydown/keyup, scroll) from CDP actions,
 so tracking.js captures full telemetry. Without this flag, telemetry
 will be sparse (CDP bypasses DOM listeners).
 
+Supports --mode to control how the LLM perceives the page:
+  - screenshot:     Vision-based (LLM sees screenshots)
+  - dom:            Text-based (LLM reads DOM element descriptions)
+  - accessibility:  Text-based + accessibility tree context via CDP
+  - mixed:          Cycles through all three modes round-robin
+
 Setup:
     pip install browser-use
     # browser-use v0.11+ uses CDP directly (no Playwright needed)
@@ -20,7 +26,9 @@ Usage:
 
     python bots/llm_bot.py --runs 3 --provider anthropic
     python bots/llm_bot.py --runs 3 --provider anthropic --inject-events
-    python bots/llm_bot.py --runs 3 --provider openai
+    python bots/llm_bot.py --runs 3 --mode mixed --provider anthropic
+    python bots/llm_bot.py --runs 3 --mode dom --provider openai
+    python bots/llm_bot.py --runs 1 --mode accessibility --skip-honeypot
 
 Requires:
     - browser-use >= 0.9.0
@@ -45,6 +53,9 @@ SITE_URL = "http://localhost:3000"
 API_URL = "http://localhost:5000"
 DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "bot"
 
+# Perception modes for the LLM agent
+MODES = ["screenshot", "dom", "accessibility"]
+
 # JavaScript that patches the page to generate real DOM events from
 # CDP-level automation. Injected via addScriptToEvaluateOnNewDocument
 # so it runs on every page load including navigations.
@@ -53,6 +64,16 @@ INJECT_EVENTS_JS = r"""
     if (window.__tmEventInjectorLoaded) return;
     window.__tmEventInjectorLoaded = true;
 
+    function dispatchMouseMoveBurst(x, y) {
+        for (let i = 0; i < 2; i++) {
+            const jitterX = x + (Math.random() - 0.5) * 12;
+            const jitterY = y + (Math.random() - 0.5) * 8;
+            window.dispatchEvent(new MouseEvent('mousemove', {
+                clientX: jitterX, clientY: jitterY, bubbles: true
+            }));
+        }
+    }
+
     // Patch click() to also dispatch a real MouseEvent on window
     const origClick = HTMLElement.prototype.click;
     HTMLElement.prototype.click = function() {
@@ -60,6 +81,7 @@ INJECT_EVENTS_JS = r"""
         const rect = this.getBoundingClientRect();
         const x = rect.left + rect.width / 2;
         const y = rect.top + rect.height / 2;
+        dispatchMouseMoveBurst(x, y);
         window.dispatchEvent(new MouseEvent('click', {
             clientX: x, clientY: y, bubbles: true, button: 0
         }));
@@ -72,9 +94,7 @@ INJECT_EVENTS_JS = r"""
         const rect = this.getBoundingClientRect();
         const x = rect.left + rect.width / 2;
         const y = rect.top + rect.height / 2;
-        window.dispatchEvent(new MouseEvent('mousemove', {
-            clientX: x, clientY: y, bubbles: true
-        }));
+        dispatchMouseMoveBurst(x, y);
     };
 
     // Monitor input events (from CDP insertText) and convert to keydown/keyup
@@ -84,7 +104,7 @@ INJECT_EVENTS_JS = r"""
         if (!target || !['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return;
         // Dispatch a keydown and keyup for each character of inserted data
         const data = e.data || '';
-        for (let i = 0; i < Math.min(data.length, 1); i++) {
+        for (let i = 0; i < data.length; i++) {
             target.dispatchEvent(new KeyboardEvent('keydown', {
                 key: data[i], bubbles: true, cancelable: true
             }));
@@ -105,20 +125,6 @@ INJECT_EVENTS_JS = r"""
         origScrollBy.apply(this, arguments);
         window.dispatchEvent(new Event('scroll'));
     };
-
-    // Periodically generate subtle mouse movements to simulate human presence
-    // (browser-use doesn't move the mouse between actions)
-    let _lastMouseX = 500, _lastMouseY = 400;
-    setInterval(function() {
-        // Small random jitter around last known position
-        _lastMouseX += (Math.random() - 0.5) * 30;
-        _lastMouseY += (Math.random() - 0.5) * 20;
-        _lastMouseX = Math.max(10, Math.min(window.innerWidth - 10, _lastMouseX));
-        _lastMouseY = Math.max(10, Math.min(window.innerHeight - 10, _lastMouseY));
-        window.dispatchEvent(new MouseEvent('mousemove', {
-            clientX: _lastMouseX, clientY: _lastMouseY, bubbles: true
-        }));
-    }, 50 + Math.random() * 100);  // ~8-14 Hz, slightly irregular
 
     console.log('[TM] Event injector loaded — DOM events will be generated');
 })();
@@ -166,7 +172,7 @@ def get_recent_session_ids() -> list[str]:
 
 
 def save_telemetry_json(session_id: str, raw: dict, run_index: int) -> Path:
-    """Save raw telemetry in Chrome extension export format."""
+    """Save raw telemetry in live_confirm format (same as human exports)."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     mouse = raw.get("mouse", [])
@@ -175,27 +181,22 @@ def save_telemetry_json(session_id: str, raw: dict, run_index: int) -> Path:
     scroll = raw.get("scroll", [])
 
     consolidated = {
-        session_id: {
-            "sessionId": session_id,
-            "startTime": int(time.time() * 1000),
-            "pageMeta": [],
-            "totalSegments": 1,
-            "segments": [{
-                "segmentId": 1,
-                "url": SITE_URL,
-                "hostname": "localhost",
-                "startTime": int(time.time() * 1000),
-                "endTime": int(time.time() * 1000),
-                "mouse": mouse,
-                "clicks": clicks,
-                "keystrokes": keystrokes,
-                "scroll": scroll,
-            }],
-        }
+        "sessionId": session_id,
+        "label": 0,
+        "exportedAt": datetime.now(timezone.utc).isoformat(),
+        "source": "live_confirm",
+        "bot_type": "llm",
+        "tier": 5,
+        "segments": [{
+            "mouse": mouse,
+            "clicks": clicks,
+            "keystrokes": keystrokes,
+            "scroll": scroll,
+        }],
     }
 
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
-    filename = f"telemetry_export_{ts}_llm_run{run_index}.json"
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S-%f")
+    filename = f"session_{session_id[:13]}_{ts}.json"
     out_path = DATA_DIR / filename
 
     with open(out_path, "w") as f:
@@ -223,6 +224,89 @@ async def _inject_event_script(browser) -> bool:
     except Exception as e:
         print(f"  WARNING: Could not inject event script: {e}")
         return False
+
+
+async def _get_accessibility_tree(browser, max_chars: int = 4000) -> str | None:
+    """Extract the accessibility tree from the current page via CDP.
+
+    Returns a formatted text representation of the accessibility tree,
+    truncated to max_chars. Returns None if extraction fails.
+    """
+    try:
+        cdp_session = getattr(browser, "agent_focus", None)
+        if cdp_session is None:
+            return None
+
+        cdp_client = getattr(cdp_session, "cdp_client", None)
+        if cdp_client is None:
+            return None
+
+        result = await cdp_client.send.Accessibility.getFullAXTree(
+            params={},
+            session_id=cdp_session.session_id,
+        )
+
+        nodes = result.get("nodes", [])
+        if not nodes:
+            return None
+
+        lines = []
+        # Build a lookup for parent-child relationships
+        node_map = {}
+        for node in nodes:
+            node_id = node.get("nodeId", "")
+            node_map[node_id] = node
+
+        # Determine depth of each node via parentId chain
+        def get_depth(n):
+            depth = 0
+            visited = set()
+            current = n
+            while True:
+                pid = current.get("parentId")
+                if not pid or pid in visited:
+                    break
+                visited.add(pid)
+                parent = node_map.get(pid)
+                if not parent:
+                    break
+                current = parent
+                depth += 1
+            return depth
+
+        for node in nodes:
+            role = node.get("role", {}).get("value", "")
+            name = node.get("name", {}).get("value", "")
+            # Skip generic/invisible nodes
+            if role in ("none", "generic", "InlineTextBox", "StaticText") and not name:
+                continue
+
+            depth = get_depth(node)
+            indent = "  " * min(depth, 10)
+            props = []
+            for prop in node.get("properties", []):
+                prop_name = prop.get("name", "")
+                prop_val = prop.get("value", {}).get("value", "")
+                if prop_name in ("focusable", "editable", "required", "disabled", "checked"):
+                    if prop_val:
+                        props.append(prop_name)
+
+            line = f"{indent}[{role}]"
+            if name:
+                line += f' "{name}"'
+            if props:
+                line += f" ({', '.join(props)})"
+            lines.append(line)
+
+        tree_text = "\n".join(lines)
+        if len(tree_text) > max_chars:
+            tree_text = tree_text[:max_chars] + "\n... (truncated)"
+
+        return tree_text
+
+    except Exception as e:
+        print(f"  WARNING: Could not extract accessibility tree: {e}")
+        return None
 
 
 async def _read_session_id_from_browser(browser) -> str | None:
@@ -345,9 +429,51 @@ def confirm_bot(session_id: str) -> None:
         print("  WARNING: Could not confirm bot label with RL agent")
 
 
+def _build_task_prompt(skip_honeypot: bool = False) -> str:
+    """Build the default task prompt for the LLM bot."""
+    task = f"""
+Go to {SITE_URL} and complete the full ticket booking flow:
+1. Browse the available concerts on the home page
+2. Click on a concert's "Tickets" button to view available sections
+3. Select a section, then click "Continue to Checkout"
+4. Fill in the checkout form with realistic fake data:
+   - Card number: 4111111111111111
+   - Expiry: 12/28
+   - CVV: 123
+   - Full name: any realistic name
+   - Billing address: any realistic address
+   - City, State, Zip code
+5. Click "Purchase" to submit
+
+Act naturally - take your time browsing, move around the page,
+scroll through options before selecting.
+
+If you encounter a challenge or puzzle and fail it, STOP immediately.
+Do not retry the challenge. Just end the task.
+"""
+    if skip_honeypot:
+        task += """
+IMPORTANT: Only fill in the form fields listed above (card number,
+expiry, CVV, name, address, city, state, zip). If you see any other
+input fields that are not in this list, DO NOT fill them in — skip
+them completely. They may be hidden traps.
+"""
+    return task
+
+
 async def run_llm_bot(provider: str = "anthropic", task: str | None = None,
-                      browser=None, inject_events: bool = False):
-    """Run a single LLM bot session."""
+                      browser=None, inject_events: bool = False,
+                      mode: str = "screenshot", skip_honeypot: bool = False):
+    """Run a single LLM bot session.
+
+    Args:
+        provider: LLM provider ("anthropic" or "openai")
+        task: Custom task prompt (None for default)
+        browser: Existing Browser instance to reuse
+        inject_events: Whether to inject DOM event generation script
+        mode: Perception mode — "screenshot", "dom", or "accessibility"
+        skip_honeypot: If True, task prompt tells LLM to skip unknown fields
+    """
     try:
         from browser_use import Agent, Browser
     except ImportError:
@@ -356,23 +482,7 @@ async def run_llm_bot(provider: str = "anthropic", task: str | None = None,
         sys.exit(1)
 
     if task is None:
-        task = f"""
-        Go to {SITE_URL} and complete the full ticket booking flow:
-        1. Browse the available concerts on the home page
-        2. Click on a concert's "Tickets" button to view available sections
-        3. Select a section, then click "Continue to Checkout"
-        4. Fill in the checkout form with realistic fake data:
-           - Card number: 4111111111111111
-           - Expiry: 12/28
-           - CVV: 123
-           - Full name: any realistic name
-           - Billing address: any realistic address
-           - City, State, Zip code
-        5. Click "Purchase" to submit
-
-        Act naturally - take your time browsing, move around the page,
-        scroll through options before selecting.
-        """
+        task = _build_task_prompt(skip_honeypot=skip_honeypot)
 
     if provider == "anthropic":
         from browser_use import ChatAnthropic
@@ -380,6 +490,9 @@ async def run_llm_bot(provider: str = "anthropic", task: str | None = None,
     elif provider == "openai":
         from browser_use import ChatOpenAI
         llm = ChatOpenAI(model="gpt-4o")
+    elif provider == "gemini":
+        from browser_use.llm import ChatGoogle
+        llm = ChatGoogle(model="gemini-2.0-flash")
     else:
         print(f"Unknown provider: {provider}")
         sys.exit(1)
@@ -395,14 +508,38 @@ async def run_llm_bot(provider: str = "anthropic", task: str | None = None,
     if inject_events:
         await _inject_event_script(browser)
 
-    agent = Agent(task=task, llm=llm, browser=browser)
+    # Configure agent based on perception mode
+    use_vision = (mode == "screenshot")
+    extend_msg = None
+
+    if mode == "accessibility":
+        # Extract accessibility tree and add it as context
+        ax_tree = await _get_accessibility_tree(browser)
+        if ax_tree:
+            extend_msg = (
+                "You are navigating a website using its accessibility tree. "
+                "Below is the current page's accessibility structure:\n\n"
+                f"```\n{ax_tree}\n```\n\n"
+                "Use this information along with the DOM element descriptions "
+                "to understand the page layout and interact with elements."
+            )
+            print(f"  Accessibility tree extracted ({len(ax_tree)} chars)")
+        else:
+            print("  WARNING: Could not extract accessibility tree, falling back to DOM-only")
+
+    agent_kwargs = dict(task=task, llm=llm, browser=browser, use_vision=use_vision)
+    if extend_msg:
+        agent_kwargs["extend_system_message"] = extend_msg
+
+    agent = Agent(**agent_kwargs)
     result = await agent.run()
     print(f"Agent result: {result}")
     return browser
 
 
 async def run_multiple(provider: str, runs: int, task: str | None,
-                       pause: float, inject_events: bool = False):
+                       pause: float, inject_events: bool = False,
+                       mode: str = "mixed", skip_honeypot: bool = False):
     """Run multiple LLM bot sessions."""
     try:
         from browser_use import Browser
@@ -410,26 +547,40 @@ async def run_multiple(provider: str, runs: int, task: str | None,
         print("Error: browser-use not installed.")
         sys.exit(1)
 
-    browser = Browser(
-        headless=False,
-        disable_security=True,
-        args=["--no-first-run"],
-    )
-
     for i in range(runs):
         print(f"\n{'='*50}")
+
+        # Determine perception mode for this run
+        if mode == "mixed":
+            current_mode = MODES[i % len(MODES)]
+        else:
+            current_mode = mode
+
         # Alternate injection: even runs get injection, odd runs don't
         use_injection = inject_events and (i % 2 == 0)
-        mode = "WITH event injection" if use_injection else "WITHOUT event injection (sparse)"
-        print(f"LLM Bot Run {i + 1}/{runs} ({mode})")
+        inject_label = " + event injection" if use_injection else ""
+        print(f"LLM Bot Run {i + 1}/{runs} [mode: {current_mode}{inject_label}]")
         print(f"{'='*50}")
+
+        # Fresh browser per run so tracking.js gets a new session ID
+        browser = Browser(
+            headless=False,
+            disable_security=True,
+            args=["--no-first-run"],
+        )
 
         # Snapshot current session IDs so we can find the new one after
         known_ids = get_recent_session_ids()
 
         try:
-            await run_llm_bot(provider=provider, task=task, browser=browser,
-                              inject_events=use_injection)
+            await run_llm_bot(
+                provider=provider,
+                task=task,
+                browser=browser,
+                inject_events=use_injection,
+                mode=current_mode,
+                skip_honeypot=skip_honeypot,
+            )
         except Exception as e:
             print(f"  Run {i + 1} error: {e}")
 
@@ -441,6 +592,12 @@ async def run_multiple(provider: str, runs: int, task: str | None,
         if session_id:
             confirm_bot(session_id)
 
+        # Close browser to ensure next run gets a fresh session
+        try:
+            await browser.close()
+        except Exception:
+            pass
+
         if i < runs - 1:
             print(f"Waiting {pause}s before next run...")
             await asyncio.sleep(pause)
@@ -450,23 +607,32 @@ async def run_multiple(provider: str, runs: int, task: str | None,
     print(f"Telemetry saved to: {DATA_DIR}")
     print("="*50)
 
-    input("Press Enter to close the browser...")
+    if sys.stdin.isatty():
+        input("Press Enter to close the browser...")
     await browser.stop()
 
 
 def main():
     parser = argparse.ArgumentParser(description="Run LLM-powered bot")
     parser.add_argument("--runs", type=int, default=1)
-    parser.add_argument("--provider", choices=["anthropic", "openai"], default="anthropic")
+    parser.add_argument("--provider", choices=["anthropic", "openai", "gemini"], default="anthropic")
     parser.add_argument("--pause-between", type=float, default=3.0)
     parser.add_argument("--task", type=str, default=None)
     parser.add_argument("--inject-events", action="store_true",
                         help="Inject DOM events so tracking.js captures full telemetry. "
                              "Alternates: even runs get injection, odd runs don't.")
+    parser.add_argument("--mode", choices=["screenshot", "dom", "accessibility", "mixed"],
+                        default="mixed",
+                        help="Perception mode: screenshot (vision), dom (text-only), "
+                             "accessibility (accessibility tree context), or mixed (cycles all three)")
+    parser.add_argument("--skip-honeypot", action="store_true",
+                        help="Tell LLM to skip unknown/hidden form fields (avoids honeypot traps)")
     args = parser.parse_args()
 
-    mode = "alternating injection" if args.inject_events else "native CDP (sparse telemetry)"
-    print(f"LLM Bot ({args.provider}) - {args.runs} runs [{mode}]")
+    mode_label = f"mode: {args.mode}"
+    inject_label = " + alternating injection" if args.inject_events else ""
+    honeypot_label = " + skip-honeypot" if args.skip_honeypot else ""
+    print(f"LLM Bot ({args.provider}) - {args.runs} runs [{mode_label}{inject_label}{honeypot_label}]")
     print(f"Target: {SITE_URL}")
     print(f"Output: {DATA_DIR}")
     print()
@@ -479,6 +645,8 @@ def main():
         task=args.task,
         pause=args.pause_between,
         inject_events=args.inject_events,
+        mode=args.mode,
+        skip_honeypot=args.skip_honeypot,
     ))
 
 
