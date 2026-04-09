@@ -19,12 +19,12 @@ import json
 import sys
 from pathlib import Path
 
+from classifier.augmentation import adversarial_augment_sessions
+from rl_captcha.data.loader import load_from_directory
+
 # Allow running from repo root or src/
 _SRC_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_SRC_ROOT))
-
-from classifier.augmentation import adversarial_augment_sessions
-from rl_captcha.data.loader import load_from_directory
 
 
 def _session_to_dict(session) -> dict:
@@ -45,16 +45,29 @@ def _session_to_dict(session) -> dict:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Generate adversarially augmented bot sessions "
-                    "(same pipeline as classifier Section 3.5.3)"
+        "(same pipeline as classifier Section 3.5.3)"
     )
-    p.add_argument("--data-dir", type=str, default="data/",
-                    help="Path to data directory with human/ and bot/ subdirs")
-    p.add_argument("--out-dir", type=str, default=None,
-                    help="Output directory (default: <data-dir>/bot_augmented)")
-    p.add_argument("--n-copies", type=int, default=2,
-                    help="Number of augmented copies per bot per difficulty level (default: 2)")
-    p.add_argument("--seed", type=int, default=42,
-                    help="Random seed for reproducibility")
+    p.add_argument(
+        "--data-dir",
+        type=str,
+        default="data/",
+        help="Path to data directory with human/ and bot/ subdirs",
+    )
+    p.add_argument(
+        "--out-dir",
+        type=str,
+        default=None,
+        help="Output directory (default: <data-dir>/bot_augmented)",
+    )
+    p.add_argument(
+        "--n-copies",
+        type=int,
+        default=2,
+        help="Number of augmented copies per bot per difficulty level (default: 2)",
+    )
+    p.add_argument(
+        "--seed", type=int, default=42, help="Random seed for reproducibility"
+    )
     return p.parse_args()
 
 
@@ -108,7 +121,7 @@ def main():
     for s in augmented:
         lvl = s.metadata.get("aug_level", "unknown")
         levels[lvl] = levels.get(lvl, 0) + 1
-    print(f"\n  Summary:")
+    print("\n  Summary:")
     for lvl, count in sorted(levels.items()):
         print(f"    {lvl}: {count} sessions")
     print(f"    total: {len(augmented)} sessions")
