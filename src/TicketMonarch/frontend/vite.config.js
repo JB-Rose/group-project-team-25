@@ -25,7 +25,7 @@ export default defineConfig({
     include: ['tests/unit/**/*.test.jsx'],
     coverage: {
       provider: 'v8',
-      reporter: ['text', 'lcov'],
+      reporter: ['text', 'html', 'lcov'],
       reportsDirectory: path.resolve(__dirname, '../../../docs/evaluation/coverage-report'),
       exclude: [
         'src/assets/**',

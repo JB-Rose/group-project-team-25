@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/SJSU-CMPE-195/group-project-team-25/actions/workflows/ci.yml/badge.svg)](https://github.com/SJSU-CMPE-195/group-project-team-25/actions/workflows/ci.yml)
 
-[![codecov](https://codecov.io/gh/SJSU-CMPE-195/group-project-team-25/branch/main/graph/badge.svg)](https://codecov.io/gh/SJSU-CMPE-195/group-project-team-25)
+![Coverage Badge](./coverage.svg)
 
 ## Team
 
