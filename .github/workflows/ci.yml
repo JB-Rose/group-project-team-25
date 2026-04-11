@@ -38,5 +38,10 @@ jobs:
       - name: Install Dependencies
         run: npm install
 
-      - name: Run Vitest
+      - name: Run tests with coverage
         run: npm test
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./docs/evaluation/coverage-report/lcov.info

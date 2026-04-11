@@ -24,6 +24,9 @@ export default defineConfig({
     setupFiles: 'tests/setupTests.js',
     include: ['tests/unit/**/*.test.jsx'],
     coverage: {
+      provider: 'v8',
+      reporter: ['text', 'lcov'],
+      reportsDirectory: path.resolve(__dirname, '../../../docs/evaluation/coverage-report'),
       exclude: [
         'src/assets/**',
         '**/*.css'
