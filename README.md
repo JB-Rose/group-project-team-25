@@ -32,6 +32,11 @@
 
 ## Demo Notebooks
 
+End-to-end walkthroughs of the RL pipeline — data loading, training PPO/DG/Soft-PPO agents on collected human + bot telemetry, evaluation, and figure generation. Useful for quickly understanding how the agents are trained and how the augmented bot data affects performance, without spinning up the full web app.
+
+- [src/rl_algorithms.ipynb](src/rl_algorithms.ipynb) — clean source notebook (no outputs). Run this fresh to reproduce results.
+- [src/rl_algorithms_executed.ipynb](src/rl_algorithms_executed.ipynb) — pre-run snapshot with all plots and outputs baked in. View this if you just want to see results without re-running.
+
 ---
 
 ## Getting Started
