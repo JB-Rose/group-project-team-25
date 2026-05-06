@@ -234,3 +234,44 @@ class Config:
     checkpoints_dir: Path = field(
         default_factory=lambda: _PROJECT_ROOT / "rl_captcha" / "agent" / "checkpoints"
     )
+
+
+# ---------------------------------------------------------------------------
+# Reward presets — pass --reward-preset v1 or v2 to train_ppo.py
+#
+# v1 (pre-Apr-2026): simple block/allow rewards, flat honeypot trigger rate,
+#   puzzle friction encoded as per-action costs.
+# v2 (current default): puzzle-aware rewards, tier-dependent honeypot rates,
+#   explicit UX friction and catch-reward dicts.
+# ---------------------------------------------------------------------------
+
+def _make_v1_env_config() -> EventEnvConfig:
+    """Translate the old (v1) reward field semantics into current EventEnvConfig fields."""
+    from dataclasses import replace
+
+    base = EventEnvConfig()
+    return replace(
+        base,
+        # v1 had per-action costs for puzzle UX friction; direct block was the top reward
+        action_costs=[0.0, 0.01, 0.10, 0.30, 0.50, 0.0, 0.0],
+        # Bot caught by puzzle → same as correct direct block in v1
+        puzzle_catch_rewards={2: 1.0, 3: 1.0, 4: 1.0},
+        # Human passes puzzle → negative of old action_costs
+        human_puzzle_friction={2: -0.10, 3: -0.30, 4: -0.50},
+        penalty_human_puzzle_fail=-1.0,       # old penalty_false_positive
+        penalty_bot_passes_puzzle=-0.4,        # old penalty_false_negative * 0.5
+        reward_direct_block_bot=1.0,           # old reward_correct_block
+        penalty_block_human=-1.0,              # old penalty_false_positive
+        penalty_bot_missed_allow=-0.8,         # old penalty_false_negative
+        reward_correct_allow=0.5,
+        honeypot_info_bonus=0.3,               # old value (new default is 0.5)
+        # v1 used a single flat bot trigger rate of 0.6 regardless of tier
+        honeypot_trigger_rates_by_tier={1: 0.6, 2: 0.6, 3: 0.6, 4: 0.6, 5: 0.6},
+        honeypot_trigger_rate_bot_fallback=0.6,
+    )
+
+
+REWARD_PRESETS: dict[str, EventEnvConfig] = {
+    "v1": _make_v1_env_config(),
+    "v2": EventEnvConfig(),  # current defaults
+}

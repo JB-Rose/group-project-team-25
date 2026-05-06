@@ -27,7 +27,7 @@ from collections import defaultdict
 
 import numpy as np
 
-from rl_captcha.config import Config
+from rl_captcha.config import Config, REWARD_PRESETS
 from rl_captcha.data.loader import (
     load_from_directory,
     split_sessions,
@@ -103,6 +103,13 @@ def parse_args() -> argparse.Namespace:
         nargs="*",
         default=None,
         help="Bot tiers to hold out from train/val (test-only)",
+    )
+    p.add_argument(
+        "--reward-preset",
+        type=str,
+        default="v2",
+        choices=list(REWARD_PRESETS.keys()),
+        help="Reward environment preset to evaluate in: v1 or v2 (default: v2)",
     )
     return p.parse_args()
 
@@ -196,10 +203,12 @@ def main():
             f"{len(eval_sessions)} sessions ({h} human, {b} bot)"
         )
 
-    # Create environment (shared across all agents — same eval data)
+    # Create environment using the requested reward preset
     from dataclasses import replace
 
-    eval_cfg = replace(cfg.event_env, augment=False)
+    preset_cfg = REWARD_PRESETS[args.reward_preset]
+    eval_cfg = replace(preset_cfg, augment=False)
+    print(f"  Reward preset: {args.reward_preset}")
     env = EventEnv(eval_sessions, config=eval_cfg)
 
     # Parse agent specs
@@ -327,6 +336,7 @@ def _run_evaluation(
         total_reward = 0.0
         steps = 0
         actions_taken = []
+        honeypots_deployed = 0  # actual deployments (not maxed-out attempts)
 
         action_mask = info.get("action_mask")
         done = False
@@ -340,6 +350,9 @@ def _run_evaluation(
             total_reward += reward
             steps += 1
             actions_taken.append(action)
+            step_outcome = step_info.get("outcome", "")
+            if step_outcome in ("honeypot_triggered", "honeypot_no_trigger"):
+                honeypots_deployed += 1
             action_mask = step_info.get("action_mask")
             info = step_info
 
@@ -351,6 +364,7 @@ def _run_evaluation(
                 "reward": total_reward,
                 "steps": steps,
                 "actions": actions_taken,
+                "honeypots_deployed": honeypots_deployed,
                 "final_action": actions_taken[-1] if actions_taken else -1,
             }
         )
@@ -405,8 +419,8 @@ def _compute_metrics(episodes: list[dict]) -> dict:
     )
     accuracy = (tp + tn) / n if n > 0 else 0.0
 
-    # Honeypot usage
-    honeypot_counts = [sum(1 for a in e["actions"] if a == 1) for e in episodes]
+    # Honeypot usage — count actual deployments, not attempted actions
+    honeypot_counts = [e.get("honeypots_deployed", sum(1 for a in e["actions"] if a == 1)) for e in episodes]
     episodes_with_honeypot = sum(1 for c in honeypot_counts if c > 0)
     avg_honeypots = float(np.mean(honeypot_counts)) if honeypot_counts else 0.0
 
@@ -493,7 +507,7 @@ def _print_results(results: dict, agent_name: str = "agent", split_name: str = "
     print()
 
     # Honeypot usage
-    honeypot_counts = [sum(1 for a in e["actions"] if a == 1) for e in episodes]
+    honeypot_counts = [e.get("honeypots_deployed", sum(1 for a in e["actions"] if a == 1)) for e in episodes]
     eps_with_hp = sum(1 for c in honeypot_counts if c > 0)
     avg_hp = float(np.mean(honeypot_counts)) if honeypot_counts else 0.0
     total_hp = sum(honeypot_counts)

@@ -41,12 +41,15 @@ Usage (with adversarial augmentation):
 from __future__ import annotations
 
 import argparse
+import random
 import time
 from collections import defaultdict
+from dataclasses import replace
 
 import numpy as np
+import torch
 
-from rl_captcha.config import Config
+from rl_captcha.config import Config, REWARD_PRESETS
 from rl_captcha.data.loader import (
     load_from_directory,
     split_sessions,
@@ -163,6 +166,20 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Bot tiers to hold out from training (e.g. 3 4 5)",
     )
+    p.add_argument(
+        "--reward-preset",
+        type=str,
+        default="v2",
+        choices=list(REWARD_PRESETS.keys()),
+        help="Reward structure preset: v1 (pre-Apr-2026 flat rewards) or v2 (current puzzle-aware rewards)",
+    )
+    p.add_argument(
+        "--train-seed",
+        type=int,
+        default=None,
+        help="Seed for model weight initialization (for multi-seed runs). "
+             "Separate from --split-seed which controls data splitting.",
+    )
     return p.parse_args()
 
 
@@ -176,13 +193,27 @@ def main():
     args = parse_args()
     cfg = Config()
 
+    # Apply reward preset before any per-flag overrides
+    cfg.event_env = REWARD_PRESETS[args.reward_preset]
+    print(f"  Reward preset: {args.reward_preset}")
+
     if args.total_timesteps is not None:
         cfg.ppo.total_timesteps = args.total_timesteps
     if args.lr is not None:
         cfg.ppo.lr = args.lr
     if args.fp_penalty is not None:
-        cfg.event_env.penalty_false_positive = args.fp_penalty
-        cfg.event_env.penalty_human_puzzle_fail = args.fp_penalty
+        cfg.event_env = replace(
+            cfg.event_env,
+            penalty_false_positive=args.fp_penalty,
+            penalty_human_puzzle_fail=args.fp_penalty,
+        )
+
+    # Seed model weight initialization independently of the data split seed
+    if args.train_seed is not None:
+        torch.manual_seed(args.train_seed)
+        np.random.seed(args.train_seed)
+        random.seed(args.train_seed)
+        print(f"  Train seed: {args.train_seed}")
 
     # Load data (include augmented bot sessions when --adversarial-augment is on)
     print(f"Loading sessions from {args.data_dir}...")
