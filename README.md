@@ -2,9 +2,9 @@
 
 > A mock concert ticket-booking web app that uses reinforcement learning (PPO, DG, or Soft PPO — all LSTM-based) to detect bots in real time based on raw telemetry (mouse movements, clicks, keystrokes, scrolls).
 
-[![CI](https://github.com/SJSU-CMPE-195/group-project-team-25/actions/workflows/ci.yml/badge.svg)](https://github.com/SJSU-CMPE-195/group-project-team-25/actions/workflows/ci.yml)
+[![CI](https://github.com/JB-Rose/group-project-team-25/actions/workflows/ci.yml/badge.svg)](https://github.com/JB-Rose/group-project-team-25/actions/workflows/ci.yml)
 
-[![codecov](https://codecov.io/gh/SJSU-CMPE-195/group-project-team-25/graph/badge.svg?token=K07K6AT9LO)](https://codecov.io/gh/SJSU-CMPE-195/group-project-team-25)
+[![codecov](https://codecov.io/gh/JB-Rose/group-project-team-25/graph/badge.svg?token=K07K6AT9LO)](https://codecov.io/gh/JB-Rose/group-project-team-25)
 
 ## Team
 
