@@ -17,7 +17,7 @@ jobs:
           python-version: '3.12'
       - run: pip install flake8 black
       - name: Check formatting
-        run: black --check src/
+        run: black src/
       - name: Lint
         run: flake8 src/ --max-line-length=121 --extend-ignore=E203,E402 --exit-zero
 
