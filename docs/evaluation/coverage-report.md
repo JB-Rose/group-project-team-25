@@ -3,4 +3,4 @@
 ## Coverage Report
 
 View full coverage report on Codecov:
-https://app.codecov.io/gh/SJSU-CMPE-195/group-project-team-25/
+https://app.codecov.io/gh/JB-Rose/group-project-team-25/
